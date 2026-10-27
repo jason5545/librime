@@ -18,7 +18,10 @@
 #include <rime/context.h>
 #include <rime/engine.h>
 #include <rime/language.h>
+#include <fstream>
+#include <rime/deployer.h>
 #include <rime/schema.h>
+#include <rime/service.h>
 #include <rime/translation.h>
 #include <rime/algo/syllabifier.h>
 #include <rime/dict/corrector.h>
@@ -195,7 +198,36 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
       enable_word_completion_ = enable_completion_;
     }
     config->GetInt(name_space_ + "/max_homophones", &max_homophones_);
+    config->GetInt(name_space_ + "/max_user_phrase_syllables",
+                   &max_user_phrase_syllables_);
     poet_.reset(new Poet(language(), config));
+    // Jason 原型：學習紀錄排序公式、撤銷學習的時間窗
+    auto& sc = UserDictionary::scoring();
+    config->GetInt(name_space_ + "/revert_learning_seconds", &sc.revert_window);
+    string mode;
+    if (config->GetString(name_space_ + "/user_scoring/mode", &mode)) {
+      sc.mode = (mode == "frequency") ? 1 : 0;
+      config->GetDouble(name_space_ + "/user_scoring/recency", &sc.recency);
+      config->GetDouble(name_space_ + "/user_scoring/unit", &sc.unit);
+      config->GetDouble(name_space_ + "/user_scoring/prior_weight",
+                        &sc.prior_weight);
+      string prior_file;
+      if (config->GetString(name_space_ + "/user_scoring/prior_file",
+                            &prior_file) &&
+          sc.prior.empty()) {
+        path file = Service::instance().deployer().user_data_dir / prior_file;
+        std::ifstream in(file.string());
+        string word;
+        double count;
+        while (in >> word >> count) {
+          sc.prior[word] = count;
+        }
+        LOG(INFO) << "user_scoring prior: " << sc.prior.size() << " entries from "
+                  << file;
+      }
+      LOG(INFO) << "user_scoring mode=" << sc.mode << " recency=" << sc.recency
+                << " unit=" << sc.unit << " prior_weight=" << sc.prior_weight;
+    }
   }
   if (enable_correction_) {
     if (auto* corrector = Corrector::Require("corrector")) {
@@ -698,7 +730,8 @@ void ScriptTranslation::EnrollEntries(
 WordGraph ScriptTranslation::PrepareForMakingSentence(
     Dictionary* dict,
     UserDictionary* user_dict) {
-  const int kMaxSyllablesForUserPhraseQuery = 5;
+  const int kMaxSyllablesForUserPhraseQuery =
+      translator_->max_user_phrase_syllables();
   const auto& syllable_graph = syllabifier_->syllable_graph();
   WordGraph graph;
   for (const auto& x : syllable_graph.edges) {

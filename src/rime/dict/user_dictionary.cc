@@ -152,6 +152,11 @@ bool UserDictEntryIterator::Next() {
 
 // UserDictionary members
 
+UserDictScoring& UserDictionary::scoring() {
+  static UserDictScoring s_scoring;
+  return s_scoring;
+}
+
 UserDictionary::UserDictionary(const string& name, an<Db> db)
     : name_(name), db_(db) {}
 
@@ -496,7 +501,7 @@ bool UserDictionary::RevertRecentTransaction() {
   auto db = As<Transactional>(db_);
   if (!db || !db->in_transaction())
     return false;
-  if (time(NULL) - transaction_time_ > 3 /*seconds*/)
+  if (time(NULL) - transaction_time_ > scoring().revert_window)
     return false;
   return db->AbortTransaction();
 }
@@ -550,9 +555,23 @@ an<DictEntry> UserDictionary::CreateDictEntry(const string& key,
   e = New<DictEntry>();
   e->text = key.substr(separator_pos + 1);
   e->commit_count = v.commits;
-  // TODO: argument s not defined...
-  double weight = algo::formula_p(0, (double)v.commits / present_tick,
-                                  (double)present_tick, v.dee);
+  const auto& sc = scoring();
+  double weight;
+  if (sc.mode == 1) {
+    // 頻率為主、新近為輔：一次剛打的新近值（dee≈1）只折合 recency 次打字，
+    // 原版公式裡一次新近大約等於 200 次舊的打字。
+    double prior = 0.0;
+    if (sc.prior_weight > 0 && !sc.prior.empty()) {
+      auto found = sc.prior.find(e->text);
+      if (found != sc.prior.end())
+        prior = found->second;
+    }
+    weight = sc.unit * (v.commits + sc.recency * v.dee + sc.prior_weight * prior);
+  } else {
+    // TODO: argument s not defined...
+    weight = algo::formula_p(0, (double)v.commits / present_tick,
+                             (double)present_tick, v.dee);
+  }
   e->weight = log(weight > 0 ? weight : DBL_EPSILON) + credibility;
   e->quality_len = quality_len;
   if (full_code) {

@@ -46,8 +46,23 @@ struct SyllableGraph;
 struct DfsState;
 struct Ticket;
 
+// Jason 原型：學習紀錄的排序公式（全行程共用，由 script_translator 依方案設定填入）
+struct UserDictScoring {
+  // 0 = 原版（新近為主）；1 = 頻率為主、新近為輔：
+  //   weight = log(unit * (commits + recency * dee_now + prior_weight * prior(text)))
+  int mode = 0;
+  double recency = 3.0;
+  double unit = 1e-5;
+  double prior_weight = 0.0;
+  hash_map<string, double> prior;
+  // 送出後幾秒內按 BackSpace（沒有輸入中的文字時）會撤銷剛才的學習；原版寫死 3 秒
+  int revert_window = 3;
+};
+
 class UserDictionary : public Class<UserDictionary, const Ticket&> {
  public:
+  static UserDictScoring& scoring();
+
   UserDictionary(const string& name, an<Db> db);
   virtual ~UserDictionary();
 

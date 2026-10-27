@@ -52,6 +52,7 @@ class ScriptTranslator : public Translator,
   bool enable_word_completion() const { return enable_word_completion_; }
   int max_word_length() const { return max_word_length_; }
   int core_word_length() const;
+  int max_user_phrase_syllables() const { return max_user_phrase_syllables_; }
 
  protected:
   int max_homophones_ = 1;
@@ -61,6 +62,8 @@ class ScriptTranslator : public Translator,
   bool always_show_comments_ = false;
   bool enable_correction_ = false;
   bool enable_word_completion_ = false;
+  // Jason 原型：整句可用的學習紀錄最長音節數（原版寫死 5）
+  int max_user_phrase_syllables_ = 5;
   the<Corrector> corrector_;
   the<Poet> poet_;
   vector<an<Phrase>> queue_;

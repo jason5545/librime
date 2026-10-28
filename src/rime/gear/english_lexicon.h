@@ -8,6 +8,7 @@
 #define RIME_ENGLISH_LEXICON_H_
 
 #include <rime/common.h>
+#include <rime/gear/english_judge.h>
 
 namespace rime {
 
@@ -20,6 +21,10 @@ class EnglishLexicon {
   static an<EnglishLexicon> Require(const string& name,
                                     int min_length,
                                     double min_zipf);
+
+  // 判斷表 <name>.tbl（tools/gen_judge.py 產生）：先找使用者資料夾，再找共用資料夾；
+  // 找不到或格式不對時回傳 nullptr。同一個檔案（路徑、修改時間相同）只開一次，所有方案共用。
+  static an<EnglishJudge> RequireJudge(const string& name);
 
   bool Find(const string& word, double* zipf) const;
   size_t size() const { return words_.size(); }

@@ -23,6 +23,7 @@
 #include <rime/schema.h>
 #include <rime/service.h>
 #include <rime/translation.h>
+#include <limits>
 #include <rime/algo/syllabifier.h>
 #include <rime/dict/corrector.h>
 #include <rime/dict/dictionary.h>
@@ -161,6 +162,8 @@ class ScriptTranslation : public Translation {
                      map<pair<size_t, size_t>, an<WordGraph>>* cache,
                      WordGraph* graph);
   bool PhrasesExhausted() const;
+  // 還沒放英文候選時的第一候選（判斷用；不改變之後出候選的順序）
+  an<Phrase> PeekFirstCandidate();
 
   ScriptTranslator* translator_;
   Poet* poet_;
@@ -173,15 +176,21 @@ class ScriptTranslation : public Translation {
   an<UserDictEntryCollector> user_phrase_;
   deque<an<Sentence>> sentences_;
   deque<an<Phrase>> english_;
+  // 含單字表外字母串的英文句（沒排第一的）：排在第 english_letter_position 個
+  deque<an<Phrase>> english_late_;
+  // 判斷說英文句比原本的第一候選通順：english_ 的第一句排第一
+  bool english_first_ = false;
 
   an<Phrase> candidate_ = nullptr;
   size_t candidate_index_ = 0;
+  size_t chinese_index_ = 0;  // 出過幾個英文以外的候選
   enum CandidateSource {
     kUninitialized,
     kUserPhrase,
     kSysPhrase,
     kSentence,
     kEnglish,
+    kEnglishLate,
   };
   CandidateSource candidate_source_ = kUninitialized;
 
@@ -230,6 +239,25 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
       config->GetDouble(name_space_ + "/english_weight", &english_weight_);
       english_lexicon_ = EnglishLexicon::Require(
           english_lexicon, english_min_length_, english_min_zipf_);
+      // 中英混輸的判斷：判斷表（tools/gen_judge.py）、τ、第一候選有學過幾字以上的詞就不換
+      string english_judge;
+      if (english_lexicon_ &&
+          config->GetString(name_space_ + "/english_judge", &english_judge) &&
+          !english_judge.empty()) {
+        english_judge_ = EnglishLexicon::RequireJudge(english_judge);
+      }
+      config->GetDouble(name_space_ + "/english_judge_tau", &english_judge_tau_);
+      config->GetInt(name_space_ + "/english_judge_learned",
+                     &english_judge_learned_);
+      // 單字表以外的連續字母串（頭尾各少 0–english_letter_trim 個字母）也當英文，只在有判斷表時
+      config->GetBool(name_space_ + "/english_letter_runs",
+                      &english_letter_runs_);
+      config->GetInt(name_space_ + "/english_letter_trim",
+                     &english_letter_trim_);
+      config->GetDouble(name_space_ + "/english_letter_penalty",
+                        &english_letter_penalty_);
+      config->GetInt(name_space_ + "/english_letter_position",
+                     &english_letter_position_);
     }
     poet_.reset(new Poet(language(), config));
     // Jason 原型：學習紀錄排序公式、撤銷學習的時間窗
@@ -637,6 +665,10 @@ bool ScriptTranslation::Evaluate(Dictionary* dict, UserDictionary* user_dict) {
 }
 
 bool ScriptTranslation::Next() {
+  if (!exhausted() && candidate_source_ == kUninitialized)
+    PrepareCandidate();
+  const bool english_popped =
+      candidate_source_ == kEnglish || candidate_source_ == kEnglishLate;
   do {
     if (exhausted())
       return false;
@@ -653,6 +685,10 @@ bool ScriptTranslation::Next() {
       case kEnglish:
         if (!english_.empty())
           english_.pop_front();
+        break;
+      case kEnglishLate:
+        if (!english_late_.empty())
+          english_late_.pop_front();
         break;
       case kUserPhrase: {
         UserDictEntryIterator& uter(user_phrase_iter_->second);
@@ -683,6 +719,9 @@ bool ScriptTranslation::Next() {
            ++correction_count_ > max_corrections_);
   if (!CheckEmpty()) {
     ++candidate_index_;
+    if (!english_popped)
+      ++chinese_index_;
+    english_first_ = false;
     return true;
   }
   return false;
@@ -702,7 +741,7 @@ an<Candidate> ScriptTranslation::Peek() {
       candidate_->set_comment(/*quote_left + */ spelling /* + quote_right*/);
     }
   }
-  if (candidate_source_ != kEnglish)
+  if (candidate_source_ != kEnglish && candidate_source_ != kEnglishLate)
     candidate_->set_syllabifier(syllabifier_);
   return candidate_;
 }
@@ -727,13 +766,23 @@ iter_incremented:
     candidate_ = nullptr;
     return false;
   }
-  // 蓬萊：英文句排在第 english_position 個；後面沒有別的候選時直接出
+  // 蓬萊：英文句排在第 english_position 個（前面有 english_position − 1 個中文候選）；
+  // 判斷說英文句比較通順時第一句排第一；後面沒有別的候選時直接出
   if (!english_.empty() &&
-      (static_cast<int>(candidate_index_) + 1 >=
+      ((english_first_ && candidate_index_ == 0) ||
+       static_cast<int>(chinese_index_) + 1 >=
            translator_->english_position() ||
        (sentences_.empty() && PhrasesExhausted()))) {
     candidate_source_ = kEnglish;
     candidate_ = english_.front();
+    return true;
+  }
+  if (!english_late_.empty() &&
+      (static_cast<int>(chinese_index_) + 1 >=
+           translator_->english_letter_position() ||
+       (sentences_.empty() && PhrasesExhausted()))) {
+    candidate_source_ = kEnglishLate;
+    candidate_ = english_late_.front();
     return true;
   }
   if (!sentences_.empty()) {
@@ -813,13 +862,22 @@ iter_incremented:
   }
 }
 
+an<Phrase> ScriptTranslation::PeekFirstCandidate() {
+  if (candidate_source_ == kUninitialized && !PrepareCandidate())
+    return nullptr;
+  auto first = candidate_;
+  candidate_source_ = kUninitialized;
+  candidate_.reset();
+  return first;
+}
+
 bool ScriptTranslation::PhrasesExhausted() const {
   return (!phrase_ || phrase_iter_ == phrase_->rend()) &&
          (!user_phrase_ || user_phrase_iter_ == user_phrase_->rend());
 }
 
 bool ScriptTranslation::CheckEmpty() {
-  set_exhausted(PhrasesExhausted() && english_.empty());
+  set_exhausted(PhrasesExhausted() && english_.empty() && english_late_.empty());
   return exhausted();
 }
 
@@ -900,6 +958,7 @@ struct EnglishSpan {
   size_t end;
   double zipf;
   size_t length() const { return end - start; }
+  bool in_lexicon = true;  // false：單字表外的字母串（english_letter_runs）
 };
 
 // 英文候選的切點是組成它的每個詞的邊界（移游標時一次跳一個詞）
@@ -983,10 +1042,12 @@ bool ScriptTranslation::EnrollSegment(
 void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
                                               UserDictionary* user_dict) {
   const auto& lexicon = translator_->english_lexicon();
+  const auto& judge = translator_->english_judge();
   const size_t n = input_.length();
   const size_t min_length =
       static_cast<size_t>((std::max)(1, translator_->english_min_length()));
-  // 1. 連續的小寫字母裡，單字表對得上的每一段
+  // 1. 連續的小寫字母裡，單字表對得上的每一段；有判斷表又開了 english_letter_runs 時，
+  //    整串字母（頭尾各少 0–english_letter_trim 個）也算一段，通不通交給判斷
   vector<EnglishSpan> spans;
   for (size_t i = 0; i < n;) {
     if (!is_lowercase_letter(input_[i])) {
@@ -1002,6 +1063,22 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
         double zipf = 0.0;
         if (lexicon->Find(input_.substr(a, b - a), &zipf))
           spans.push_back({a, b, zipf});
+      }
+    }
+    if (judge && translator_->english_letter_runs()) {
+      const size_t trim = static_cast<size_t>(
+          (std::max)(0, translator_->english_letter_trim()));
+      for (size_t a = i; a <= i + trim && a < run_end; ++a) {
+        for (size_t b = run_end; b + trim >= run_end && b > a; --b) {
+          if (b - a < min_length)
+            break;
+          bool known = false;
+          for (const auto& s : spans)
+            known = known || (s.start == a && s.end == b);
+          // 單字表外的字母串：權重只影響英文句之間的先後，判斷時不看
+          if (!known)
+            spans.push_back({a, b, translator_->english_min_zipf(), false});
+        }
       }
     }
     i = run_end;
@@ -1046,16 +1123,31 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
 
   // 3. 每種切法組一句：中文段各自切音節、查詞，跟英文邊放進同一張詞圖，
   //    由 Poet 跟語言模型一起排，英文前後的中文吃得到彼此當前文
+  struct Made {
+    an<Phrase> cand;
+    const vector<EnglishSpan>* config;
+    double score;  // 判斷分數 − τ × 英文段數（沒有判斷表時是整句權重）
+  };
   const string preceding_text = translator_->GetPrecedingText(start_);
   map<pair<size_t, size_t>, an<WordGraph>> cache;
-  vector<an<Sentence>> made;
+  vector<Made> made;
   an<Phrase> word;
   for (const auto& config : configs) {
     const auto& last = config.back();
     if (config.size() == 1 && last.start == 0) {
-      // 開頭就是英文詞：單獨一個候選（整段就是它時，Poet 也不收只有一個詞的整句）
-      if (!word || last.end == n ||
-          (word->end() != start_ + n && last.length() > word->end() - start_)) {
+      if (last.end == n) {
+        // 整段就是英文詞（Poet 不收只有一個詞的整句）：當成一個完整的英文候選
+        auto entry = make_entry(last);
+        entry->preedit = entry->text;
+        auto whole = New<Phrase>(translator_->language(), "english", start_,
+                                 start_ + n, entry);
+        whole->set_syllabifier(
+            New<EnglishSyllabifier>(vector<size_t>{start_, start_ + n}));
+        made.push_back({whole, &config, entry->weight});
+        continue;
+      }
+      // 開頭就是英文詞：另給那個詞（不是整句，不參加判斷，排在英文句後面）
+      if (!word || last.length() > word->end() - start_) {
         auto entry = make_entry(last);
         entry->preedit = entry->text;
         word = New<Phrase>(translator_->language(), "english", start_,
@@ -1063,8 +1155,6 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
         word->set_syllabifier(New<EnglishSyllabifier>(
             vector<size_t>{start_, start_ + last.end}));
       }
-      if (last.end == n)
-        continue;
     }
     WordGraph graph;
     size_t pos = 0;
@@ -1104,24 +1194,105 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
     sentence->Offset(start_);
     sentence->set_preedit(preedit);
     sentence->set_syllabifier(New<EnglishSyllabifier>(std::move(vertices)));
-    made.push_back(sentence);
+    made.push_back({sentence, &config, sentence->weight()});
   }
 
-  // 4. 照整句權重排，跟原本的整句、彼此重複的拿掉，最多 english_max_sentences 句；
-  //    開頭的英文詞排在這幾句後面
+  // 4. 判斷：原本的第一候選（還沒放英文）和每個英文候選都打分。英文候選裡的英文詞，
+  //    原本的第一候選都已經有（不分大小寫）的不要（只是把後面的中文重組得更短）。
+  //    英文候選照「判斷分數 − τ × 英文段數 − english_letter_penalty × 單字表外的段數」排；最好的那個比原本的第一候選高、
+  //    而且第一候選裡沒有學過 english_judge_learned 字以上的詞，才排第一
+  bool promote = false;
+  double first_score = 0;
+  if (judge) {
+    CheckEmpty();  // 建構時是 exhausted，Evaluate 最後才更新；這時 english_ 還是空的
+    auto first = PeekFirstCandidate();
+    first_score = -std::numeric_limits<double>::infinity();
+    string first_lower;
+    int learned = 0;
+    auto utf8_length = [](const string& text) {
+      int k = 0;
+      for (unsigned char c : text)
+        k += (c & 0xC0) != 0x80;
+      return k;
+    };
+    if (first) {
+      first_score = judge->Score(first->text());
+      first_lower = first->text();
+      for (char& c : first_lower) {
+        if (c >= 'A' && c <= 'Z')
+          c = c - 'A' + 'a';
+      }
+      if (auto sentence = As<Sentence>(first)) {
+        for (const auto& e : sentence->components()) {
+          if (e.commit_count > 0)
+            learned = (std::max)(learned, utf8_length(e.text));
+        }
+      } else if (first->entry().commit_count > 0) {
+        learned = utf8_length(first->text());
+      }
+    }
+    const double tau = translator_->english_judge_tau();
+    vector<Made> kept;
+    for (auto& m : made) {
+      bool all_in_first = !first_lower.empty();
+      for (const auto& s : *m.config) {
+        all_in_first = all_in_first &&
+                       first_lower.find(input_.substr(s.start, s.length())) !=
+                           string::npos;
+      }
+      if (all_in_first)
+        continue;
+      m.score = judge->Score(m.cand->text()) -
+                tau * static_cast<double>(m.config->size());
+      for (const auto& s : *m.config) {
+        if (!s.in_lexicon)
+          m.score -= translator_->english_letter_penalty();
+      }
+      kept.push_back(m);
+    }
+    made.swap(kept);
+    // 開頭的英文詞也一樣：原本的第一候選已經有就不另給
+    if (word && first_lower.find(word->text()) != string::npos)
+      word.reset();
+    const int guard = translator_->english_judge_learned();
+    promote = !(guard > 0 && learned >= guard);
+  }
+
+  // 5. 照分數排（沒有判斷表時是整句權重），跟原本的整句、彼此重複的拿掉，
+  //    最多 english_max_sentences 個；開頭的英文詞排在這幾個後面
+  // 同分（同一句文字，切法不同）時英文鍵數多的優先：組字區顯示成英文
+  auto english_keys = [](const Made& m) {
+    size_t k = 0;
+    for (const auto& s : *m.config)
+      k += s.length();
+    return k;
+  };
   std::stable_sort(made.begin(), made.end(),
-                   [](const an<Sentence>& x, const an<Sentence>& y) {
-                     return x->weight() > y->weight();
+                   [&](const Made& x, const Made& y) {
+                     return x.score > y.score ||
+                            (x.score == y.score &&
+                             english_keys(x) > english_keys(y));
                    });
   set<string> seen;
   for (const auto& sentence : sentences_)
     seen.insert(sentence->text());
-  for (const auto& sentence : made) {
-    if (static_cast<int>(english_.size()) >=
+  for (const auto& m : made) {
+    if (static_cast<int>(english_.size() + english_late_.size()) >=
         translator_->english_max_sentences())
       break;
-    if (seen.insert(sentence->text()).second)
-      english_.push_back(sentence);
+    if (seen.insert(m.cand->text()).second) {
+      // 排第一：實際排在最前面的那個英文候選，分數比原本的第一候選高
+      const bool front = english_.empty() && english_late_.empty();
+      if (front)
+        english_first_ = promote && m.score > first_score;
+      bool letters = false;
+      for (const auto& s : *m.config)
+        letters = letters || !s.in_lexicon;
+      if (letters && !(front && english_first_))
+        english_late_.push_back(m.cand);
+      else
+        english_.push_back(m.cand);
+    }
   }
   if (word && seen.insert(word->text()).second)
     english_.push_back(word);

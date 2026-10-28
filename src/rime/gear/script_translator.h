@@ -20,6 +20,7 @@ class Code;
 class Corrector;
 struct DictEntry;
 class Dictionary;
+class EnglishJudge;
 class EnglishLexicon;
 class Poet;
 struct RawInputFormat;
@@ -59,9 +60,19 @@ class ScriptTranslator : public Translator,
   // 蓬萊：英文單字進整句
   const an<EnglishLexicon>& english_lexicon() const { return english_lexicon_; }
   int english_min_length() const { return english_min_length_; }
+  double english_min_zipf() const { return english_min_zipf_; }
   int english_position() const { return english_position_; }
   int english_max_sentences() const { return english_max_sentences_; }
   double english_weight() const { return english_weight_; }
+  // 蓬萊：中英混輸的判斷（translator/english_judge）。有表時英文句和原本的第一候選都打分，
+  // 英文句贏過第一候選 english_judge_tau × 英文段數以上才排第一；沒有表時照舊排在 english_position
+  const an<EnglishJudge>& english_judge() const { return english_judge_; }
+  double english_judge_tau() const { return english_judge_tau_; }
+  int english_judge_learned() const { return english_judge_learned_; }
+  bool english_letter_runs() const { return english_letter_runs_; }
+  int english_letter_trim() const { return english_letter_trim_; }
+  double english_letter_penalty() const { return english_letter_penalty_; }
+  int english_letter_position() const { return english_letter_position_; }
   // 英文字母的假音節（詞典裡「注音＋~」的音節，只能簡拼），拼成英文詞的碼；
   // 有字母找不到時回傳 false，code 不動（這個詞就不寫學習紀錄）
   bool EnglishCode(const string& word, Code* code);
@@ -83,6 +94,13 @@ class ScriptTranslator : public Translator,
   int english_position_ = 2;
   int english_max_sentences_ = 2;
   double english_weight_ = 0.0;
+  an<EnglishJudge> english_judge_;
+  double english_judge_tau_ = 4.0;
+  int english_judge_learned_ = 4;
+  bool english_letter_runs_ = false;
+  int english_letter_trim_ = 2;
+  double english_letter_penalty_ = 4.0;
+  int english_letter_position_ = 6;
   bool english_letters_ready_ = false;
   vector<int32_t> english_letters_;  // a–z 的假音節；-1 表示詞典裡沒有
   // preedit_format for input after the caret (set on the context)

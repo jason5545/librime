@@ -81,6 +81,46 @@ an<EnglishLexicon> EnglishLexicon::Require(const string& name,
   return lexicon;
 }
 
+an<EnglishJudge> EnglishLexicon::RequireJudge(const string& name) {
+  if (name.empty())
+    return nullptr;
+  const auto& deployer = Service::instance().deployer();
+  path file;
+  for (const auto& dir : {deployer.user_data_dir, deployer.shared_data_dir}) {
+    path candidate = dir / (name + ".tbl");
+    if (std::filesystem::exists(candidate)) {
+      file = candidate;
+      break;
+    }
+  }
+  if (file.empty()) {
+    LOG(WARNING) << "english judge table not found: " << name << ".tbl";
+    return nullptr;
+  }
+  std::error_code ec;
+  auto mtime = static_cast<long long>(
+      std::filesystem::last_write_time(file, ec).time_since_epoch().count());
+  // 只留弱參照：沒有翻譯器在用（重新部署之後）就放掉 mmap；檔案換過（修改時間不同）就重開
+  static std::mutex mutex;
+  static map<string, pair<long long, weak<EnglishJudge>>> cache;
+  std::lock_guard<std::mutex> lock(mutex);
+  auto& slot = cache[file.u8string()];
+  if (auto judge = slot.second.lock()) {
+    if (slot.first == mtime)
+      return judge;
+  }
+  string error;
+  auto judge = EnglishJudge::Open(file.string(), &error);
+  if (judge) {
+    LOG(INFO) << "english judge: " << file << " (" << judge->file_size()
+              << " bytes)";
+  } else {
+    LOG(ERROR) << "english judge: cannot load " << file << ": " << error;
+  }
+  slot = {mtime, judge};
+  return judge;
+}
+
 bool EnglishLexicon::Find(const string& word, double* zipf) const {
   auto found = words_.find(word);
   if (found == words_.end())

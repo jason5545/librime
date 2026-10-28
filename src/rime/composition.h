@@ -11,6 +11,15 @@
 
 namespace rime {
 
+class Projection;
+
+// Formats raw input that no candidate covers (after the highlighted
+// candidate, or after the caret), so it reads like the candidate preedits.
+struct RawInputFormat {
+  an<Projection> projection;
+  string delimiter;
+};
+
 struct Preedit {
   string text;
   size_t caret_pos = 0;
@@ -25,9 +34,10 @@ class Composition : public Segmentation {
   bool HasFinishedComposition() const;
   Preedit GetPreedit(const string& full_input,
                      size_t caret_pos,
-                     const string& caret) const;
+                     const string& caret,
+                     const RawInputFormat* format = nullptr) const;
   string GetPrompt() const;
-  string GetCommitText() const;
+  string GetCommitText(const RawInputFormat* format = nullptr) const;
   string GetScriptText(bool keep_selection = true) const;
   RIME_DLL string GetDebugText() const;
   // Returns text of the last segment before the given position.

@@ -21,6 +21,7 @@ class Corrector;
 struct DictEntry;
 class Dictionary;
 class Poet;
+struct RawInputFormat;
 class UserDictionary;
 struct SyllableGraph;
 
@@ -29,6 +30,7 @@ class ScriptTranslator : public Translator,
                          public TranslatorOptions {
  public:
   ScriptTranslator(const Ticket& ticket);
+  virtual ~ScriptTranslator();
 
   virtual an<Translation> Query(const string& input,
                                 const Segment& segment) override;
@@ -64,6 +66,8 @@ class ScriptTranslator : public Translator,
   bool enable_word_completion_ = false;
   // Jason 原型：整句可用的學習紀錄最長音節數（原版寫死 5）
   int max_user_phrase_syllables_ = 5;
+  // preedit_format for input after the caret (set on the context)
+  an<RawInputFormat> raw_input_format_;
   the<Corrector> corrector_;
   the<Poet> poet_;
   vector<an<Phrase>> queue_;

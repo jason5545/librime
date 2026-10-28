@@ -31,6 +31,12 @@ string Context::GetCommitText() const {
   return composition_.GetCommitText();
 }
 
+string Context::GetCommitTextPreview() const {
+  if (get_option("dumb"))
+    return string();
+  return composition_.GetCommitText(raw_input_format_.get());
+}
+
 string Context::GetScriptText() const {
   return composition_.GetScriptText();
 }
@@ -42,7 +48,8 @@ string Context::GetSoftCursor() const {
 }
 
 Preedit Context::GetPreedit() const {
-  return composition_.GetPreedit(input_, caret_pos_, GetSoftCursor());
+  return composition_.GetPreedit(input_, caret_pos_, GetSoftCursor(),
+                                raw_input_format_.get());
 }
 
 bool Context::IsComposing() const {

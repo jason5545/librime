@@ -9,8 +9,21 @@
 #include <rime/candidate.h>
 #include <rime/composition.h>
 #include <rime/menu.h>
+#include <rime/algo/algebra.h>
 
 namespace rime {
+
+// after_code: the text before it is formatted code, so separate them with the
+// delimiter as the candidate preedit does between syllables.
+static string FormatRawInput(const string& raw,
+                             const RawInputFormat* format,
+                             bool after_code) {
+  if (!format || !format->projection || raw.empty())
+    return raw;
+  string text = after_code ? format->delimiter + raw : raw;
+  format->projection->Apply(&text);
+  return text;
+}
 
 bool Composition::HasFinishedComposition() const {
   if (empty())
@@ -23,11 +36,13 @@ bool Composition::HasFinishedComposition() const {
 
 Preedit Composition::GetPreedit(const string& full_input,
                                 size_t caret_pos,
-                                const string& caret) const {
+                                const string& caret,
+                                const RawInputFormat* format) const {
   Preedit preedit;
   preedit.caret_pos = string::npos;
   size_t start = 0;
   size_t end = 0;
+  bool after_code = false;
   for (size_t i = 0; i < size(); ++i) {
     start = end;
     if (caret_pos == start) {
@@ -62,6 +77,7 @@ Preedit Composition::GetPreedit(const string& full_input,
         } else {
           preedit.text += cand->preedit();
         }
+        after_code = true;
       } else {
         end = at(i).end;
         preedit.text += input_.substr(start, end - start);
@@ -72,14 +88,16 @@ Preedit Composition::GetPreedit(const string& full_input,
     }
   }
   if (end < input_.length()) {
-    preedit.text += input_.substr(end);
+    preedit.text += FormatRawInput(input_.substr(end), format, after_code);
     end = input_.length();
+    after_code = true;
   }
   if (preedit.caret_pos == string::npos) {
     preedit.caret_pos = preedit.text.length();
   }
   if (end < full_input.length()) {
-    preedit.text += full_input.substr(end);
+    preedit.text += FormatRawInput(full_input.substr(end), format,
+                                   after_code && !preedit.text.empty());
   }
   // insert soft cursor and prompt string.
   auto prompt = caret + GetPrompt();
@@ -99,7 +117,7 @@ string Composition::GetPrompt() const {
   return empty() ? string() : back().prompt;
 }
 
-string Composition::GetCommitText() const {
+string Composition::GetCommitText(const RawInputFormat* format) const {
   string result;
   size_t end = 0;
   for (const Segment& seg : *this) {
@@ -114,7 +132,7 @@ string Composition::GetCommitText() const {
     }
   }
   if (input_.length() > end) {
-    result += input_.substr(end);
+    result += FormatRawInput(input_.substr(end), format, false);
   }
   return result;
 }

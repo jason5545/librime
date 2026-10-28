@@ -234,6 +234,26 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
       corrector_.reset(corrector->Create(ticket));
     }
   }
+  // the main translator's preedit_format also applies to raw input left
+  // uncovered (after the caret, or after a shorter candidate)
+  if (name_space_ == "translator") {
+    Config* config = engine_->schema()->config();
+    auto projection = New<Projection>();
+    if (config &&
+        projection->Load(config->GetList(name_space_ + "/preedit_format"))) {
+      raw_input_format_ = New<RawInputFormat>();
+      raw_input_format_->projection = projection;
+      raw_input_format_->delimiter = delimiters_.substr(0, 1);
+      engine_->context()->set_raw_input_format(raw_input_format_);
+    }
+  }
+}
+
+ScriptTranslator::~ScriptTranslator() {
+  if (engine_ && raw_input_format_ &&
+      engine_->context()->raw_input_format() == raw_input_format_) {
+    engine_->context()->set_raw_input_format(nullptr);
+  }
 }
 
 an<Translation> ScriptTranslator::Query(const string& input,

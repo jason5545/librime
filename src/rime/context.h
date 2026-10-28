@@ -30,6 +30,8 @@ class RIME_DLL Context {
 
   bool Commit();
   string GetCommitText() const;
+  // commit text for display: raw input left at the end is formatted
+  string GetCommitTextPreview() const;
   string GetScriptText() const;
   Preedit GetPreedit() const;
   bool IsComposing() const;
@@ -66,6 +68,11 @@ class RIME_DLL Context {
   void set_caret_pos(size_t caret_pos);
   size_t caret_pos() const { return caret_pos_; }
 
+  void set_raw_input_format(an<RawInputFormat> format) {
+    raw_input_format_ = format;
+  }
+  an<RawInputFormat> raw_input_format() const { return raw_input_format_; }
+
   void set_composition(Composition&& comp);
   Composition& composition() { return composition_; }
   const Composition& composition() const { return composition_; }
@@ -101,6 +108,7 @@ class RIME_DLL Context {
   string input_;
   size_t caret_pos_ = 0;
   Composition composition_;
+  an<RawInputFormat> raw_input_format_;
   CommitHistory commit_history_;
   map<string, bool> options_;
   map<string, string> properties_;

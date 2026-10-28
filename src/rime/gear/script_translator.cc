@@ -26,7 +26,9 @@
 #include <rime/algo/syllabifier.h>
 #include <rime/dict/corrector.h>
 #include <rime/dict/dictionary.h>
+#include <rime/dict/prism.h>
 #include <rime/dict/user_dictionary.h>
+#include <rime/gear/english_lexicon.h>
 #include <rime/gear/poet.h>
 #include <rime/gear/script_translator.h>
 #include <rime/gear/translator_commons.h>
@@ -123,10 +125,12 @@ class ScriptTranslation : public Translation {
                     double sentence_cutoff_threshold)
       : translator_(translator),
         poet_(poet),
+        input_(input),
         start_(start),
         end_of_input_(end_of_input),
         syllabifier_(
             New<ScriptSyllabifier>(translator, corrector, input, start)),
+        corrector_(corrector),
         enable_correction_(corrector),
         max_sentences_(max_sentences),
         sentence_cutoff_threshold_(sentence_cutoff_threshold) {
@@ -148,9 +152,19 @@ class ScriptTranslation : public Translation {
   an<Sentence> MakeSentence(Dictionary* dict, UserDictionary* user_dict);
   deque<an<Sentence>> MakeSentences(Dictionary* dict,
                                     UserDictionary* user_dict);
+  // 蓬萊：英文單字進整句
+  void MakeEnglishCandidates(Dictionary* dict, UserDictionary* user_dict);
+  bool EnrollSegment(Dictionary* dict,
+                     UserDictionary* user_dict,
+                     size_t seg_start,
+                     size_t seg_end,
+                     map<pair<size_t, size_t>, an<WordGraph>>* cache,
+                     WordGraph* graph);
+  bool PhrasesExhausted() const;
 
   ScriptTranslator* translator_;
   Poet* poet_;
+  string input_;
   size_t start_;
   size_t end_of_input_;
   an<ScriptSyllabifier> syllabifier_;
@@ -158,6 +172,7 @@ class ScriptTranslation : public Translation {
   an<DictEntryCollector> phrase_;
   an<UserDictEntryCollector> user_phrase_;
   deque<an<Sentence>> sentences_;
+  deque<an<Phrase>> english_;
 
   an<Phrase> candidate_ = nullptr;
   size_t candidate_index_ = 0;
@@ -166,6 +181,7 @@ class ScriptTranslation : public Translation {
     kUserPhrase,
     kSysPhrase,
     kSentence,
+    kEnglish,
   };
   CandidateSource candidate_source_ = kUninitialized;
 
@@ -177,6 +193,7 @@ class ScriptTranslation : public Translation {
   int max_sentences_ = 1;
   double sentence_cutoff_threshold_ = 0.1;
 
+  Corrector* corrector_;
   bool enable_correction_;
 };
 
@@ -200,6 +217,20 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
     config->GetInt(name_space_ + "/max_homophones", &max_homophones_);
     config->GetInt(name_space_ + "/max_user_phrase_syllables",
                    &max_user_phrase_syllables_);
+    // 蓬萊：英文單字進整句。輸入裡連續的小寫字母有一段是單字表裡的詞時，
+    // 多組一句「前面照常組中文＋英文照字面＋後面照常組中文」，排在第 english_position 個候選
+    string english_lexicon;
+    if (config->GetString(name_space_ + "/english_lexicon", &english_lexicon) &&
+        !english_lexicon.empty()) {
+      config->GetInt(name_space_ + "/english_min_length", &english_min_length_);
+      config->GetDouble(name_space_ + "/english_min_zipf", &english_min_zipf_);
+      config->GetInt(name_space_ + "/english_position", &english_position_);
+      config->GetInt(name_space_ + "/english_max_sentences",
+                     &english_max_sentences_);
+      config->GetDouble(name_space_ + "/english_weight", &english_weight_);
+      english_lexicon_ = EnglishLexicon::Require(
+          english_lexicon, english_min_length_, english_min_zipf_);
+    }
     poet_.reset(new Poet(language(), config));
     // Jason 原型：學習紀錄排序公式、撤銷學習的時間窗
     auto& sc = UserDictionary::scoring();
@@ -387,6 +418,9 @@ bool ScriptTranslator::UpdateElements(const CommitEntry& commit_entry) {
   }
   if (update_elements) {
     for (const DictEntry* e : commit_entry.elements) {
+      // 蓬萊：沒有碼的英文詞（詞典裡沒有它的假音節）不寫
+      if (e->code.empty())
+        continue;
       user_dict_->UpdateEntry(*e, 0);
     }
   }
@@ -395,7 +429,46 @@ bool ScriptTranslator::UpdateElements(const CommitEntry& commit_entry) {
 
 bool ScriptTranslator::Memorize(const CommitEntry& commit_entry) {
   UpdateElements(commit_entry);
+  // 蓬萊：有沒有碼的英文詞時，整句的碼少了那幾個字母，不寫整句
+  for (const DictEntry* e : commit_entry.elements) {
+    if (e && e->code.empty() && !e->text.empty())
+      return true;
+  }
   user_dict_->UpdateEntry(commit_entry, 1);
+  return true;
+}
+
+bool ScriptTranslator::EnglishCode(const string& word, Code* code) {
+  if (!english_letters_ready_) {
+    english_letters_ready_ = true;
+    english_letters_.assign(26, -1);
+    if (dict_ && dict_->loaded() && dict_->prism()) {
+      Prism& prism = *dict_->prism();
+      for (int i = 0; i < 26; ++i) {
+        int spelling_id = -1;
+        if (!prism.GetValue(string(1, 'a' + i), &spelling_id))
+          continue;
+        for (SpellingAccessor accessor(prism.QuerySpelling(spelling_id));
+             !accessor.exhausted(); accessor.Next()) {
+          Code one;
+          one.push_back(accessor.syllable_id());
+          vector<string> syllables;
+          if (dict_->Decode(one, &syllables) && syllables.size() == 1 &&
+              syllables[0].length() > 1 && syllables[0].back() == '~') {
+            english_letters_[i] = accessor.syllable_id();
+            break;
+          }
+        }
+      }
+    }
+  }
+  Code result;
+  for (char c : word) {
+    if (c < 'a' || c > 'z' || english_letters_[c - 'a'] < 0)
+      return false;
+    result.push_back(english_letters_[c - 'a']);
+  }
+  *code = std::move(result);
   return true;
 }
 
@@ -557,6 +630,8 @@ bool ScriptTranslation::Evaluate(Dictionary* dict, UserDictionary* user_dict) {
         sentences_.clear();
     }
   }
+  if (translator_->english_lexicon())
+    MakeEnglishCandidates(dict, user_dict);
 
   return !CheckEmpty();
 }
@@ -574,6 +649,10 @@ bool ScriptTranslation::Next() {
       case kSentence:
         if (!sentences_.empty())
           sentences_.pop_front();
+        break;
+      case kEnglish:
+        if (!english_.empty())
+          english_.pop_front();
         break;
       case kUserPhrase: {
         UserDictEntryIterator& uter(user_phrase_iter_->second);
@@ -623,7 +702,8 @@ an<Candidate> ScriptTranslation::Peek() {
       candidate_->set_comment(/*quote_left + */ spelling /* + quote_right*/);
     }
   }
-  candidate_->set_syllabifier(syllabifier_);
+  if (candidate_source_ != kEnglish)
+    candidate_->set_syllabifier(syllabifier_);
   return candidate_;
 }
 
@@ -646,6 +726,15 @@ iter_incremented:
     candidate_source_ = kUninitialized;
     candidate_ = nullptr;
     return false;
+  }
+  // 蓬萊：英文句排在第 english_position 個；後面沒有別的候選時直接出
+  if (!english_.empty() &&
+      (static_cast<int>(candidate_index_) + 1 >=
+           translator_->english_position() ||
+       (sentences_.empty() && PhrasesExhausted()))) {
+    candidate_source_ = kEnglish;
+    candidate_ = english_.front();
+    return true;
   }
   if (!sentences_.empty()) {
     candidate_source_ = kSentence;
@@ -724,9 +813,13 @@ iter_incremented:
   }
 }
 
+bool ScriptTranslation::PhrasesExhausted() const {
+  return (!phrase_ || phrase_iter_ == phrase_->rend()) &&
+         (!user_phrase_ || user_phrase_iter_ == user_phrase_->rend());
+}
+
 bool ScriptTranslation::CheckEmpty() {
-  set_exhausted((!phrase_ || phrase_iter_ == phrase_->rend()) &&
-                (!user_phrase_ || user_phrase_iter_ == user_phrase_->rend()));
+  set_exhausted(PhrasesExhausted() && english_.empty());
   return exhausted();
 }
 
@@ -796,6 +889,242 @@ an<Sentence> ScriptTranslation::MakeSentence(Dictionary* dict,
     return sentence;
   }
   return nullptr;
+}
+
+// 蓬萊：英文單字進整句
+
+namespace {
+
+struct EnglishSpan {
+  size_t start;
+  size_t end;
+  double zipf;
+  size_t length() const { return end - start; }
+};
+
+// 英文候選的切點是組成它的每個詞的邊界（移游標時一次跳一個詞）
+class EnglishSyllabifier : public PhraseSyllabifier {
+ public:
+  explicit EnglishSyllabifier(vector<size_t> vertices)
+      : vertices_(std::move(vertices)) {}
+  Spans Syllabify(const Phrase* phrase) override {
+    Spans spans;
+    spans.set_vertices(vector<size_t>(vertices_));
+    return spans;
+  }
+
+ private:
+  vector<size_t> vertices_;
+};
+
+inline bool is_lowercase_letter(char c) {
+  return c >= 'a' && c <= 'z';
+}
+
+}  // namespace
+
+bool ScriptTranslation::EnrollSegment(
+    Dictionary* dict,
+    UserDictionary* user_dict,
+    size_t seg_start,
+    size_t seg_end,
+    map<pair<size_t, size_t>, an<WordGraph>>* cache,
+    WordGraph* graph) {
+  auto key = std::make_pair(seg_start, seg_end);
+  auto found = cache->find(key);
+  an<WordGraph> part;
+  if (found != cache->end()) {
+    part = found->second;
+  } else {
+    // 這一段自己切音節、查詞：整段輸入的切法只要有一條全是正常拼法的路，
+    // 就會刪掉簡拼（algo/syllabifier.cc），英文前後的那段可能因此切不出來
+    bool is_rear = seg_end == input_.length();
+    Syllabifier syllabifier(translator_->delimiters(),
+                            is_rear && translator_->enable_completion(),
+                            translator_->strict_spelling());
+    if (corrector_)
+      syllabifier.EnableCorrection(corrector_);
+    SyllableGraph syllable_graph;
+    string seg = input_.substr(seg_start, seg_end - seg_start);
+    size_t consumed =
+        syllabifier.BuildSyllableGraph(seg, *dict->prism(), &syllable_graph);
+    // 整段都要切得開（英文後面緊接聲調鍵時，後段第一鍵就切不開）
+    if (consumed == seg.length()) {
+      part = New<WordGraph>();
+      for (const auto& x : syllable_graph.edges) {
+        map<int, DictEntryList> by_end_pos;
+        if (user_dict) {
+          EnrollEntries(by_end_pos, user_dict->Lookup(
+                                        syllable_graph, x.first,
+                                        translator_->max_user_phrase_syllables()));
+        }
+        EnrollEntries(by_end_pos, dict->Lookup(syllable_graph, x.first,
+                                               &translator_->blacklist()));
+        auto& same_start_pos = (*part)[seg_start + x.first];
+        for (auto& y : by_end_pos) {
+          same_start_pos[seg_start + y.first] = std::move(y.second);
+        }
+      }
+    }
+    (*cache)[key] = part;
+  }
+  if (!part)
+    return false;
+  for (const auto& x : *part) {
+    auto& same_start_pos = (*graph)[x.first];
+    for (const auto& y : x.second) {
+      auto& entries = same_start_pos[y.first];
+      entries.insert(entries.end(), y.second.begin(), y.second.end());
+    }
+  }
+  return true;
+}
+
+void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
+                                              UserDictionary* user_dict) {
+  const auto& lexicon = translator_->english_lexicon();
+  const size_t n = input_.length();
+  const size_t min_length =
+      static_cast<size_t>((std::max)(1, translator_->english_min_length()));
+  // 1. 連續的小寫字母裡，單字表對得上的每一段
+  vector<EnglishSpan> spans;
+  for (size_t i = 0; i < n;) {
+    if (!is_lowercase_letter(input_[i])) {
+      ++i;
+      continue;
+    }
+    size_t run_end = i;
+    while (run_end < n && is_lowercase_letter(input_[run_end]))
+      ++run_end;
+    for (size_t a = i; a < run_end; ++a) {
+      for (size_t b = a + min_length;
+           b <= run_end && b - a <= lexicon->max_length(); ++b) {
+        double zipf = 0.0;
+        if (lexicon->Find(input_.substr(a, b - a), &zipf))
+          spans.push_back({a, b, zipf});
+      }
+    }
+    i = run_end;
+  }
+  if (spans.empty())
+    return;
+
+  // 2. 切法：每一段自己一種；最長的 6 段裡互不重疊的兩段一種（一句最多兩段英文，
+  //    跟離線模擬 tools/lm/ntc.py 相同）
+  vector<vector<EnglishSpan>> configs;
+  for (const auto& s : spans)
+    configs.push_back({s});
+  vector<EnglishSpan> longest(spans);
+  std::stable_sort(longest.begin(), longest.end(),
+                   [](const EnglishSpan& x, const EnglishSpan& y) {
+                     return x.length() > y.length();
+                   });
+  if (longest.size() > 6)
+    longest.resize(6);
+  std::sort(longest.begin(), longest.end(),
+            [](const EnglishSpan& x, const EnglishSpan& y) {
+              return x.start < y.start || (x.start == y.start && x.end < y.end);
+            });
+  for (size_t p = 0; p < longest.size(); ++p) {
+    for (size_t q = p + 1; q < longest.size(); ++q) {
+      if (longest[p].end <= longest[q].start)
+        configs.push_back({longest[p], longest[q]});
+    }
+  }
+
+  auto make_entry = [this](const EnglishSpan& s) {
+    auto entry = New<DictEntry>();
+    entry->text = input_.substr(s.start, s.length());
+    translator_->EnglishCode(entry->text, &entry->code);
+    // 單字的 log 機率（Zipf 是每十億詞的次數取 log10）
+    entry->weight =
+        (s.zipf - 9.0) * std::log(10.0) + translator_->english_weight();
+    return entry;
+  };
+  const string separator =
+      translator_->FormatPreedit(translator_->delimiters().substr(0, 1));
+
+  // 3. 每種切法組一句：中文段各自切音節、查詞，跟英文邊放進同一張詞圖，
+  //    由 Poet 跟語言模型一起排，英文前後的中文吃得到彼此當前文
+  const string preceding_text = translator_->GetPrecedingText(start_);
+  map<pair<size_t, size_t>, an<WordGraph>> cache;
+  vector<an<Sentence>> made;
+  an<Phrase> word;
+  for (const auto& config : configs) {
+    const auto& last = config.back();
+    if (config.size() == 1 && last.start == 0) {
+      // 開頭就是英文詞：單獨一個候選（整段就是它時，Poet 也不收只有一個詞的整句）
+      if (!word || last.end == n ||
+          (word->end() != start_ + n && last.length() > word->end() - start_)) {
+        auto entry = make_entry(last);
+        entry->preedit = entry->text;
+        word = New<Phrase>(translator_->language(), "english", start_,
+                           start_ + last.end, entry);
+        word->set_syllabifier(New<EnglishSyllabifier>(
+            vector<size_t>{start_, start_ + last.end}));
+      }
+      if (last.end == n)
+        continue;
+    }
+    WordGraph graph;
+    size_t pos = 0;
+    bool ok = true;
+    for (const auto& s : config) {
+      if (s.start > pos &&
+          !EnrollSegment(dict, user_dict, pos, s.start, &cache, &graph)) {
+        ok = false;
+        break;
+      }
+      graph[s.start][s.end].push_back(make_entry(s));
+      pos = s.end;
+    }
+    if (ok && pos < n)
+      ok = EnrollSegment(dict, user_dict, pos, n, &cache, &graph);
+    if (!ok)
+      continue;
+    auto sentence = poet_->MakeSentence(graph, n, preceding_text);
+    if (!sentence || sentence->empty())
+      continue;
+    // 組字區：中文段照 preedit_format 顯示注音，英文照字面，詞跟詞之間放分隔符號
+    string preedit;
+    vector<size_t> vertices{start_};
+    size_t p = 0;
+    for (size_t k = 0; k < sentence->size(); ++k) {
+      size_t len = sentence->word_lengths()[k];
+      bool english = false;
+      for (const auto& s : config)
+        english = english || (s.start == p && s.end == p + len);
+      if (k > 0)
+        preedit += separator;
+      preedit += english ? input_.substr(p, len)
+                         : translator_->FormatPreedit(input_.substr(p, len));
+      p += len;
+      vertices.push_back(start_ + p);
+    }
+    sentence->Offset(start_);
+    sentence->set_preedit(preedit);
+    sentence->set_syllabifier(New<EnglishSyllabifier>(std::move(vertices)));
+    made.push_back(sentence);
+  }
+
+  // 4. 照整句權重排，跟原本的整句、彼此重複的拿掉，最多 english_max_sentences 句；
+  //    開頭的英文詞排在這幾句後面
+  std::stable_sort(made.begin(), made.end(),
+                   [](const an<Sentence>& x, const an<Sentence>& y) {
+                     return x->weight() > y->weight();
+                   });
+  set<string> seen;
+  for (const auto& sentence : sentences_)
+    seen.insert(sentence->text());
+  for (const auto& sentence : made) {
+    if (static_cast<int>(english_.size()) >=
+        translator_->english_max_sentences())
+      break;
+    if (seen.insert(sentence->text()).second)
+      english_.push_back(sentence);
+  }
+  if (word && seen.insert(word->text()).second)
+    english_.push_back(word);
 }
 
 }  // namespace rime

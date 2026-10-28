@@ -20,6 +20,7 @@ class Code;
 class Corrector;
 struct DictEntry;
 class Dictionary;
+class EnglishLexicon;
 class Poet;
 struct RawInputFormat;
 class UserDictionary;
@@ -55,6 +56,15 @@ class ScriptTranslator : public Translator,
   int max_word_length() const { return max_word_length_; }
   int core_word_length() const;
   int max_user_phrase_syllables() const { return max_user_phrase_syllables_; }
+  // 蓬萊：英文單字進整句
+  const an<EnglishLexicon>& english_lexicon() const { return english_lexicon_; }
+  int english_min_length() const { return english_min_length_; }
+  int english_position() const { return english_position_; }
+  int english_max_sentences() const { return english_max_sentences_; }
+  double english_weight() const { return english_weight_; }
+  // 英文字母的假音節（詞典裡「注音＋~」的音節，只能簡拼），拼成英文詞的碼；
+  // 有字母找不到時回傳 false，code 不動（這個詞就不寫學習紀錄）
+  bool EnglishCode(const string& word, Code* code);
 
  protected:
   int max_homophones_ = 1;
@@ -66,6 +76,15 @@ class ScriptTranslator : public Translator,
   bool enable_word_completion_ = false;
   // Jason 原型：整句可用的學習紀錄最長音節數（原版寫死 5）
   int max_user_phrase_syllables_ = 5;
+  // 蓬萊：英文單字進整句（translator/english_lexicon 沒設就不啟用）
+  an<EnglishLexicon> english_lexicon_;
+  int english_min_length_ = 4;
+  double english_min_zipf_ = 3.0;
+  int english_position_ = 2;
+  int english_max_sentences_ = 2;
+  double english_weight_ = 0.0;
+  bool english_letters_ready_ = false;
+  vector<int32_t> english_letters_;  // a–z 的假音節；-1 表示詞典裡沒有
   // preedit_format for input after the caret (set on the context)
   an<RawInputFormat> raw_input_format_;
   the<Corrector> corrector_;

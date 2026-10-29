@@ -91,6 +91,9 @@ class ScriptTranslator : public Translator,
   bool EnglishCode(const string& word, Code* code);
 
  protected:
+  // 蓬萊：詞典的變體表跟著方案選項切換（選項名稱＝變體名稱，都沒打開就用主表）
+  void SelectDictionaryVariant();
+  vector<string> variant_options_;  // 方案 switches 裡所有的選項名稱
   // 蓬萊：沒有學習紀錄的詞典詞（兩個字以上）刪除時改成隱藏（translator/dictionary_exclude_file）
   bool ExcludeOnDelete(const an<Phrase>& phrase) override;
   // 蓬萊：忘掉上一筆（translator/forget_last_code）

@@ -70,6 +70,9 @@ void EntryCollector::Collect(const path& dict_file) {
   int code_column = settings.GetColumnIndex("code");
   int weight_column = settings.GetColumnIndex("weight");
   int stem_column = settings.GetColumnIndex("stem");
+  int variant_column = weight_variant.empty()
+                           ? -1
+                           : settings.GetColumnIndex("weight@" + weight_variant);
   if (text_column == -1) {
     LOG(ERROR) << "missing text column definition in file: " << dict_file
                << ".";
@@ -109,6 +112,10 @@ void EntryCollector::Collect(const path& dict_file) {
     if (weight_column != -1 && num_columns > weight_column &&
         !row[weight_column].empty())
       weight_str = row[weight_column];
+    // 蓬萊：變體欄空著就跟 weight 欄一樣；要照 essay 詞頻寫 100%
+    if (variant_column != -1 && num_columns > variant_column &&
+        !row[variant_column].empty())
+      weight_str = row[variant_column];
     if (stem_column != -1 && num_columns > stem_column &&
         !row[stem_column].empty())
       stem_str = row[stem_column];

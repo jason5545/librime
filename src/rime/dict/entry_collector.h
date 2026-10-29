@@ -40,6 +40,8 @@ class EntryCollector : public PhraseCollector {
   vector<of<RawDictEntry>> entries;
   size_t num_entries = 0;
   ReverseLookupTable stems;
+  // 蓬萊：編變體表時設成變體名稱：詞典檔的 weight@<名稱> 欄有值就用它代替 weight 欄
+  string weight_variant;
 
  public:
   EntryCollector();

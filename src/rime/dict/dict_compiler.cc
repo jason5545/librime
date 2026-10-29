@@ -5,9 +5,12 @@
 // 2011-11-27 GONG Chen <chen.sst@gmail.com>
 //
 #include <filesystem>
+#include <algorithm>
+#include <cctype>
 #include <cfloat>
 #include <cmath>
 #include <fstream>
+#include <boost/algorithm/string.hpp>
 #include <rime/algo/algebra.h>
 #include <rime/algo/utilities.h>
 #include <rime/dict/corrector.h>
@@ -59,6 +62,37 @@ static bool get_dict_files_from_settings(vector<path>* dict_files,
     }
   }
   return true;
+}
+
+// 蓬萊：詞典檔（含 import_tables）的 columns 裡 weight@<名稱> 的名稱，照出現順序、不重複
+static vector<string> get_weight_variants(const vector<path>& dict_files) {
+  const string kPrefix = "weight@";
+  vector<string> variants;
+  for (const auto& file_path : dict_files) {
+    DictSettings settings;
+    if (!load_dict_settings_from_file(&settings, file_path) ||
+        !settings["columns"].IsList())
+      continue;
+    auto columns = settings["columns"].AsList();
+    for (auto it = columns->begin(); it != columns->end(); ++it) {
+      auto value = As<ConfigValue>(*it);
+      if (!value || !boost::starts_with(value->str(), kPrefix))
+        continue;
+      string name = value->str().substr(kPrefix.length());
+      bool valid = !name.empty();
+      for (char c : name) {
+        valid = valid && (std::isalnum(static_cast<unsigned char>(c)) || c == '_');
+      }
+      if (!valid) {
+        LOG(WARNING) << "invalid weight variant column '" << value->str()
+                     << "' in " << file_path;
+        continue;
+      }
+      if (std::find(variants.begin(), variants.end(), name) == variants.end())
+        variants.push_back(name);
+    }
+  }
+  return variants;
 }
 
 static uint32_t compute_dict_file_checksum(uint32_t initial_checksum,
@@ -155,6 +189,36 @@ bool DictCompiler::Compile(const path& schema_file) {
     else
       LOG(WARNING) << "couldn't load syllabary from '" << schema_file << "'";
   }
+  // 蓬萊：變體表（詞典檔的 weight@<名稱> 欄）。主表重編就全部重編，不然只補缺的、
+  // 跟主表不是同一份來源編的。syllabary 用主表的，音節編號才會跟主表、prism 一致
+  vector<string> stale_variants;
+  for (const auto& variant : get_weight_variants(dict_files)) {
+    if (rebuild_table) {
+      stale_variants.push_back(variant);
+      continue;
+    }
+    Table variant_table(VariantTablePath(variant));
+    if (!variant_table.Exists() || !variant_table.Load() ||
+        variant_table.dict_file_checksum() != dict_file_checksum)
+      stale_variants.push_back(variant);
+    variant_table.Close();
+  }
+  if (!stale_variants.empty() && syllabary.empty()) {
+    if (primary_table->Load() && primary_table->GetSyllabary(&syllabary)) {
+      primary_table->Close();
+    } else {
+      LOG(ERROR) << "couldn't load syllabary for variant tables of '"
+                 << dict_name_ << "'";
+      return false;
+    }
+  }
+  for (const auto& variant : stale_variants) {
+    EntryCollector collector{Syllabary(syllabary)};
+    if (!BuildTable(0, collector, &settings, dict_files, dict_file_checksum,
+                    variant)) {
+      return false;
+    }
+  }
   if (rebuild_prism &&
       !BuildPrism(schema_file, dict_file_checksum, schema_file_checksum)) {
     return false;
@@ -213,17 +277,28 @@ static path relocate_target(const path& source_path,
   return target_resolver->ResolvePath(resource_id);
 }
 
+path DictCompiler::VariantTablePath(const string& variant) const {
+  return target_resolver_->ResolvePath(dict_name_ + "." + variant +
+                                       ".table.bin");
+}
+
 bool DictCompiler::BuildTable(int table_index,
                               EntryCollector& collector,
                               DictSettings* settings,
                               const vector<path>& dict_files,
-                              uint32_t dict_file_checksum) {
-  auto& table = tables_[table_index];
+                              uint32_t dict_file_checksum,
+                              const string& variant) {
+  // 蓬萊：變體表另存一個檔，不換掉 tables_ 裡的主表
+  an<Table> variant_table;
+  auto& table = variant.empty() ? tables_[table_index] : variant_table;
   auto target_path =
-      relocate_target(table->file_path(), target_resolver_.get());
+      variant.empty()
+          ? relocate_target(table->file_path(), target_resolver_.get())
+          : VariantTablePath(variant);
   LOG(INFO) << "building table: " << target_path;
   table = New<Table>(target_path);
 
+  collector.weight_variant = variant;
   collector.Configure(settings);
   collector.Collect(dict_files);
   if (options_ & kDump) {
@@ -270,7 +345,7 @@ bool DictCompiler::BuildTable(int table_index,
     }
   }
   // build reverse db for the primary table
-  if (table_index == 0 &&
+  if (table_index == 0 && variant.empty() &&
       !BuildReverseDb(settings, collector, vocabulary, dict_file_checksum)) {
     return false;
   }

@@ -415,6 +415,45 @@ bool Dictionary::loaded() const {
   return !tables_.empty() && tables_[0]->IsOpen() && prism_ && prism_->IsOpen();
 }
 
+an<Table> Dictionary::FindVariant(const string& variant) {
+  auto found = variant_tables_.find(variant);
+  if (found != variant_tables_.end())
+    return found->second;
+  const auto& base = base_table_ ? base_table_ : tables_[0];
+  an<Table> table;
+  if (table_loader_ && base && base->IsOpen()) {
+    table = table_loader_(name_ + "." + variant);
+    if (table && !table->IsOpen() && !(table->Exists() && table->Load()))
+      table.reset();
+    if (table && table->dict_file_checksum() != base->dict_file_checksum()) {
+      LOG(WARNING) << "variant table '" << table->file_path()
+                   << "' does not match the primary table; ignored.";
+      table.reset();
+    }
+    if (table)
+      LOG(INFO) << "loaded variant table: " << table->file_path();
+  }
+  variant_tables_[variant] = table;
+  return table;
+}
+
+bool Dictionary::HasVariant(const string& variant) {
+  return !tables_.empty() && (variant.empty() || FindVariant(variant));
+}
+
+bool Dictionary::SelectVariant(const string& variant) {
+  if (tables_.empty())
+    return false;
+  if (variant == variant_)
+    return true;
+  if (!base_table_)
+    base_table_ = tables_[0];
+  an<Table> table = variant.empty() ? nullptr : FindVariant(variant);
+  tables_[0] = table ? table : base_table_;
+  variant_ = table ? variant : string();
+  return variant.empty() || table;
+}
+
 // DictionaryComponent members
 
 static const ResourceType kPrismResourceType = {"prism", "", ".prism.bin"};
@@ -482,8 +521,18 @@ Dictionary* DictionaryComponent::Create(string dict_name,
     }
     tables.push_back(std::move(table));
   }
-  return new Dictionary(std::move(dict_name), std::move(packs),
-                        std::move(tables), std::move(prism));
+  auto dictionary = new Dictionary(std::move(dict_name), std::move(packs),
+                                   std::move(tables), std::move(prism));
+  // 蓬萊：變體表跟主表一樣在所有 session 之間共用
+  dictionary->set_table_loader([this](const string& table_name) {
+    auto table = table_map_[table_name].lock();
+    if (!table) {
+      auto file_path = table_resource_resolver_->ResolvePath(table_name);
+      table_map_[table_name] = table = New<Table>(file_path);
+    }
+    return table;
+  });
+  return dictionary;
 }
 
 }  // namespace rime

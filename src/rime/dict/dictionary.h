@@ -96,11 +96,29 @@ class Dictionary : public Class<Dictionary, const Ticket&> {
   const an<Table>& primary_table() const { return tables_[0]; }
   const an<Prism>& prism() const { return prism_; }
 
+  // 蓬萊：變體表。詞典檔有 weight@<名稱> 欄時，部署會多編一張 <詞典>.<名稱>.table.bin：
+  // 讀音、音節編號跟主表相同，只差比重和自動編碼出來的碼。選了之後查詞用它代替主表；
+  // 空字串＝主表。沒有這張表、或不是跟主表同一份來源編的，回傳 false，照舊用主表
+  RIME_DLL bool SelectVariant(const string& variant);
+  RIME_DLL bool HasVariant(const string& variant);
+  const string& variant() const { return variant_; }
+  using TableLoader = function<an<Table>(const string& table_name)>;
+  void set_table_loader(TableLoader loader) {
+    table_loader_ = std::move(loader);
+  }
+
  private:
+  an<Table> FindVariant(const string& variant);
+
   string name_;
   vector<string> packs_;
   vector<of<Table>> tables_;
   an<Prism> prism_;
+  // 蓬萊：變體表
+  an<Table> base_table_;                    // 選了變體表時，原本的主表留在這裡
+  map<string, an<Table>> variant_tables_;   // 試過的變體表（不能用的存 nullptr）
+  string variant_;
+  TableLoader table_loader_;
 };
 
 class ResourceResolver;

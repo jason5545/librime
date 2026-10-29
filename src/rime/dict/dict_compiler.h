@@ -38,11 +38,15 @@ class DictCompiler {
   void set_options(int options) { options_ = options; }
 
  private:
+  // 蓬萊：variant 不是空字串時編變體表 <詞典>.<variant>.table.bin（比重讀 weight@<variant> 欄），
+  // 不建 reverse db
   bool BuildTable(int table_index,
                   EntryCollector& collector,
                   DictSettings* settings,
                   const vector<path>& dict_files,
-                  uint32_t dict_file_checksum);
+                  uint32_t dict_file_checksum,
+                  const string& variant = string());
+  path VariantTablePath(const string& variant) const;
   bool BuildPrism(const path& schema_file,
                   uint32_t dict_file_checksum,
                   uint32_t schema_file_checksum);

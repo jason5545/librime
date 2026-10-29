@@ -22,6 +22,7 @@
 #include <rime/deployer.h>
 #include <rime/schema.h>
 #include <rime/service.h>
+#include <rime/switches.h>
 #include <rime/translation.h>
 #include <limits>
 #include <rime/algo/syllabifier.h>
@@ -318,6 +319,17 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
           [this](Context* ctx) { OnSelectForForget(ctx); });
     }
   }
+  // 蓬萊：詞典的變體表（Dictionary::SelectVariant）跟著方案選項切換：方案 switches 裡有選項的名稱
+  // 剛好是變體名稱（詞典檔的 weight@<名稱> 欄）時，那個選項打開就查那張表；都沒打開就是主表
+  if (Config* config = engine_->schema()->config()) {
+    if (dict_) {
+      Switches switches(config);
+      switches.FindOption([this](Switches::SwitchOption option) {
+        variant_options_.push_back(option.option_name);
+        return Switches::kContinue;
+      });
+    }
+  }
   if (enable_correction_) {
     if (auto* corrector = Corrector::Require("corrector")) {
       corrector_.reset(corrector->Create(ticket));
@@ -390,6 +402,7 @@ an<Translation> ScriptTranslator::Query(const string& input,
 
   FinishSession();
   RefreshBlacklist();
+  SelectDictionaryVariant();
 
   bool enable_user_dict =
       user_dict_ && user_dict_->loaded() && !IsUserDictDisabledFor(input);
@@ -410,6 +423,20 @@ an<Translation> ScriptTranslator::Query(const string& input,
   if (forget)
     return forget + deduped;
   return deduped;
+}
+
+void ScriptTranslator::SelectDictionaryVariant() {
+  if (variant_options_.empty())
+    return;
+  Context* ctx = engine_->context();
+  string variant;
+  for (const auto& option : variant_options_) {
+    if (ctx->get_option(option) && dict_->HasVariant(option)) {
+      variant = option;
+      break;
+    }
+  }
+  dict_->SelectVariant(variant);
 }
 
 int ScriptTranslator::core_word_length() const {

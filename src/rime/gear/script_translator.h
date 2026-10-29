@@ -78,6 +78,9 @@ class ScriptTranslator : public Translator,
   bool EnglishCode(const string& word, Code* code);
 
  protected:
+  // 蓬萊：沒有學習紀錄的詞典詞（兩個字以上）刪除時改成隱藏（translator/dictionary_exclude_file）
+  bool ExcludeOnDelete(const an<Phrase>& phrase) override;
+
   int max_homophones_ = 1;
   int spelling_hints_ = 0;
   int max_word_length_ = 0;

@@ -249,6 +249,7 @@ an<Translation> TableTranslator::Query(const string& input,
              << segment.end << ")";
 
   FinishSession();
+  RefreshBlacklist();
 
   bool enable_user_dict =
       user_dict_ && user_dict_->loaded() && !IsUserDictDisabledFor(input);

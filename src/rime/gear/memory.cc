@@ -141,6 +141,10 @@ void Memory::OnDeleteEntry(Context* ctx) {
   auto phrase =
       As<Phrase>(Candidate::GetGenuineCandidate(ctx->GetSelectedCandidate()));
   if (Language::intelligible(phrase, this)) {
+    if (ExcludeOnDelete(phrase)) {
+      ctx->RefreshNonConfirmedComposition();
+      return;
+    }
     const DictEntry& entry(phrase->entry());
     LOG(INFO) << "deleting entry: '" << entry.text << "'.";
     user_dict_->UpdateEntry(entry, -1);  // mark as deleted in user dict

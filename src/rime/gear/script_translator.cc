@@ -325,6 +325,7 @@ an<Translation> ScriptTranslator::Query(const string& input,
              << segment.end << ")";
 
   FinishSession();
+  RefreshBlacklist();
 
   bool enable_user_dict =
       user_dict_ && user_dict_->loaded() && !IsUserDictDisabledFor(input);
@@ -452,6 +453,24 @@ bool ScriptTranslator::UpdateElements(const CommitEntry& commit_entry) {
       user_dict_->UpdateEntry(*e, 0);
     }
   }
+  return true;
+}
+
+bool ScriptTranslator::ExcludeOnDelete(const an<Phrase>& phrase) {
+  ExcludedWords* excluded = excluded_words();
+  if (!excluded || !phrase || phrase->type() != "phrase")
+    return false;
+  const DictEntry& entry = phrase->entry();
+  if (entry.commit_count > 0)
+    return false;
+  int length = 0;
+  for (unsigned char c : entry.text)
+    length += (c & 0xC0) != 0x80;
+  if (length < dictionary_exclude_min_length())
+    return false;
+  if (!excluded->Add(entry.text))
+    return false;
+  LOG(INFO) << "dictionary_exclude_file: excluded '" << entry.text << "'.";
   return true;
 }
 

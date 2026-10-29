@@ -5,9 +5,13 @@
 // 2012-04-22 GONG Chen <chen.sst@gmail.com>
 //
 #include <algorithm>
+#include <ctime>
+#include <fstream>
 #include <boost/range/adaptor/reversed.hpp>
 #include <rime/config.h>
+#include <rime/deployer.h>
 #include <rime/schema.h>
+#include <rime/service.h>
 #include <rime/ticket.h>
 #include <rime/gear/grammar.h>
 #include <rime/gear/translator_commons.h>
@@ -161,10 +165,109 @@ TranslatorOptions::TranslatorOptions(const Ticket& ticket) {
         }
       }
     }
+    // 蓬萊：隱藏詞清單（使用者資料夾裡的檔案）
+    string exclude_file;
+    if (config->GetString(ticket.name_space + "/dictionary_exclude_file",
+                          &exclude_file) &&
+        !exclude_file.empty()) {
+      config->GetInt(ticket.name_space + "/dictionary_exclude_min_length",
+                     &dictionary_exclude_min_length_);
+      config_blacklist_ = blacklist_;
+      excluded_words_ = ExcludedWords::Require(
+          Service::instance().deployer().user_data_dir / exclude_file);
+      RefreshBlacklist();
+    }
   }
   if (delimiters_.empty()) {
     delimiters_ = " ";
   }
+}
+
+void TranslatorOptions::RefreshBlacklist() {
+  if (!excluded_words_)
+    return;
+  excluded_words_->Refresh();
+  if (excluded_words_->version() == excluded_version_)
+    return;
+  blacklist_ = config_blacklist_;
+  blacklist_.insert(excluded_words_->words().begin(),
+                    excluded_words_->words().end());
+  excluded_version_ = excluded_words_->version();
+}
+
+// ExcludedWords
+
+an<ExcludedWords> ExcludedWords::Require(const path& file) {
+  static map<string, std::weak_ptr<ExcludedWords>> registry;
+  const string key = file.string();
+  if (auto found = registry[key].lock())
+    return found;
+  auto created = New<ExcludedWords>(file);
+  registry[key] = created;
+  return created;
+}
+
+void ExcludedWords::Refresh() {
+  std::error_code ec;
+  const bool exists = std::filesystem::is_regular_file(file_, ec);
+  uintmax_t size = 0;
+  std::filesystem::file_time_type mtime;
+  if (exists) {
+    size = std::filesystem::file_size(file_, ec);
+    mtime = std::filesystem::last_write_time(file_, ec);
+  }
+  if (checked_ && exists == exists_ && size == size_ && mtime == mtime_)
+    return;
+  checked_ = true;
+  exists_ = exists;
+  size_ = size;
+  mtime_ = mtime;
+  Load();
+}
+
+void ExcludedWords::Load() {
+  hash_set<string> words;
+  std::ifstream in(file_.string());
+  string line;
+  while (std::getline(in, line)) {
+    if (!line.empty() && line.back() == '\r')
+      line.pop_back();
+    if (line.empty() || line[0] == '#' || line[0] == '\t')
+      continue;
+    words.insert(line.substr(0, line.find('\t')));
+  }
+  if (words != words_) {
+    words_.swap(words);
+    ++version_;
+    LOG(INFO) << "dictionary_exclude_file: " << words_.size()
+              << " words from " << file_;
+  }
+}
+
+bool ExcludedWords::Add(const string& word) {
+  if (word.empty() || word.find_first_of("\t\n") != string::npos)
+    return false;
+  if (Has(word))
+    return true;
+  std::ofstream out(file_.string(), std::ios::app);
+  if (!out) {
+    LOG(ERROR) << "dictionary_exclude_file: cannot write " << file_;
+    return false;
+  }
+  char stamp[32];
+  std::time_t now = std::time(nullptr);
+  std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S",
+                std::localtime(&now));
+  out << word << '\t' << stamp << '\n';
+  out.close();
+  if (!out) {
+    LOG(ERROR) << "dictionary_exclude_file: cannot write " << file_;
+    return false;
+  }
+  words_.insert(word);
+  ++version_;
+  checked_ = false;  // 下次 Refresh 記下新的大小、時間（內容相同，不會再加版本）
+  return true;
 }
 
 bool TranslatorOptions::IsUserDictDisabledFor(const string& input) const {

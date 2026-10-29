@@ -140,6 +140,35 @@ class Sentence : public Phrase {
 
 struct Ticket;
 
+// 蓬萊：使用者資料夾裡的隱藏詞清單（translator/dictionary_exclude_file），一行一個詞，
+// 詞後面可以接 Tab 和註記，# 開頭是註解。同一個檔案所有 session 共用；
+// 檔案大小或修改時間變了就重讀，手改清單不用重新部署
+class ExcludedWords {
+ public:
+  explicit ExcludedWords(const path& file) : file_(file) {}
+  static an<ExcludedWords> Require(const path& file);
+
+  // 檔案變了就重讀
+  void Refresh();
+  // 加進清單並寫進檔案（詞<Tab>時間）
+  bool Add(const string& word);
+  bool Has(const string& word) const { return words_.count(word) > 0; }
+  const hash_set<string>& words() const { return words_; }
+  // 清單內容每變一次加一
+  int version() const { return version_; }
+
+ private:
+  void Load();
+
+  path file_;
+  hash_set<string> words_;
+  bool checked_ = false;
+  bool exists_ = false;
+  uintmax_t size_ = 0;
+  std::filesystem::file_time_type mtime_;
+  int version_ = 0;
+};
+
 class TranslatorOptions {
  public:
   TranslatorOptions(const Ticket& ticket);
@@ -168,6 +197,12 @@ class TranslatorOptions {
   Projection& preedit_formatter() { return preedit_formatter_; }
   Projection& comment_formatter() { return comment_formatter_; }
   const hash_set<string>& blacklist() { return blacklist_; }
+  // 蓬萊：隱藏詞清單有變就併進 blacklist（每次查詢前呼叫）；沒設 dictionary_exclude_file 時什麼都不做
+  void RefreshBlacklist();
+  ExcludedWords* excluded_words() const { return excluded_words_.get(); }
+  int dictionary_exclude_min_length() const {
+    return dictionary_exclude_min_length_;
+  }
 
  protected:
   string delimiters_;
@@ -182,6 +217,11 @@ class TranslatorOptions {
   Projection comment_formatter_;
   Patterns user_dict_disabling_patterns_;
   hash_set<string> blacklist_;
+  // 蓬萊：隱藏詞清單
+  hash_set<string> config_blacklist_;  // dictionary_exclude 原本的詞
+  an<ExcludedWords> excluded_words_;
+  int excluded_version_ = -1;
+  int dictionary_exclude_min_length_ = 2;
 };
 
 }  // namespace rime

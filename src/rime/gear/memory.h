@@ -51,6 +51,8 @@ class Memory {
   const Language* language() const { return language_.get(); }
 
  protected:
+  // 蓬萊：刪除候選時先問子類別要不要改成別的處理（例如隱藏詞典詞）；回傳 true 就不寫學習紀錄
+  virtual bool ExcludeOnDelete(const an<Phrase>& phrase) { return false; }
   void OnCommit(Context* ctx);
   void OnDeleteEntry(Context* ctx);
   void OnUnhandledKey(Context* ctx, const KeyEvent& key);

@@ -285,14 +285,23 @@ an<DictEntryCollector> Dictionary::Lookup(const SyllableGraph& syllable_graph,
   if (collector->empty())
     return nullptr;
   // for each group of equal code length, sort it and filter words
-  for (auto& v : *collector) {
-    v.second.Sort();
+  for (auto it = collector->begin(); it != collector->end();) {
+    it->second.Sort();
     if (blacklist && !blacklist->empty()) {
-      v.second.AddFilter([blacklist](an<DictEntry> entry) {
+      it->second.AddFilter([blacklist](an<DictEntry> entry) {
         return entry && !blacklist->count(entry->text);
       });
+      // 蓬萊：整組都被擋掉時拿掉這組。留著的話 ScriptTranslation 會拿這個碼長跟學習紀錄比，
+      // Peek() 是空的（擋掉「謝謝」再打 ㄧㄝˋ ㄒㄧㄝ˙ 時當掉）
+      if (it->second.exhausted()) {
+        it = collector->erase(it);
+        continue;
+      }
     }
+    ++it;
   }
+  if (collector->empty())
+    return nullptr;
   return collector;
 }
 

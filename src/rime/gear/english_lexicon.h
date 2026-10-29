@@ -9,6 +9,7 @@
 
 #include <rime/common.h>
 #include <rime/gear/english_judge.h>
+#include <rime/gear/english_keylid.h>
 
 namespace rime {
 
@@ -25,6 +26,9 @@ class EnglishLexicon {
   // 判斷表 <name>.tbl（tools/gen_judge.py 產生）：先找使用者資料夾，再找共用資料夾；
   // 找不到或格式不對時回傳 nullptr。同一個檔案（路徑、修改時間相同）只開一次，所有方案共用。
   static an<EnglishJudge> RequireJudge(const string& name);
+
+  // 按鍵層語言辨識表 <name>.tbl（tools/gen_keylid.py 產生）：找法、共用方式同判斷表
+  static an<EnglishKeylid> RequireKeylid(const string& name);
 
   bool Find(const string& word, double* zipf) const;
   size_t size() const { return words_.size(); }

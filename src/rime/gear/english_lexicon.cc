@@ -121,6 +121,45 @@ an<EnglishJudge> EnglishLexicon::RequireJudge(const string& name) {
   return judge;
 }
 
+an<EnglishKeylid> EnglishLexicon::RequireKeylid(const string& name) {
+  if (name.empty())
+    return nullptr;
+  const auto& deployer = Service::instance().deployer();
+  path file;
+  for (const auto& dir : {deployer.user_data_dir, deployer.shared_data_dir}) {
+    path candidate = dir / (name + ".tbl");
+    if (std::filesystem::exists(candidate)) {
+      file = candidate;
+      break;
+    }
+  }
+  if (file.empty()) {
+    LOG(WARNING) << "english keylid table not found: " << name << ".tbl";
+    return nullptr;
+  }
+  std::error_code ec;
+  auto mtime = static_cast<long long>(
+      std::filesystem::last_write_time(file, ec).time_since_epoch().count());
+  static std::mutex mutex;
+  static map<string, pair<long long, weak<EnglishKeylid>>> cache;
+  std::lock_guard<std::mutex> lock(mutex);
+  auto& slot = cache[file.u8string()];
+  if (auto keylid = slot.second.lock()) {
+    if (slot.first == mtime)
+      return keylid;
+  }
+  string error;
+  auto keylid = EnglishKeylid::Open(file.string(), &error);
+  if (keylid) {
+    LOG(INFO) << "english keylid: " << file << " (" << keylid->file_size()
+              << " bytes)";
+  } else {
+    LOG(ERROR) << "english keylid: cannot load " << file << ": " << error;
+  }
+  slot = {mtime, keylid};
+  return keylid;
+}
+
 bool EnglishLexicon::Find(const string& word, double* zipf) const {
   auto found = words_.find(word);
   if (found == words_.end())

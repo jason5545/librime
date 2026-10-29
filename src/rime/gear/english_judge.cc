@@ -227,6 +227,45 @@ double EnglishJudge::EnglishLogp(const std::string& word) const {
   return lp;
 }
 
+std::string EnglishJudge::TaiwanVariants(const std::string& text) const {
+  std::string out;
+  out.reserve(text.size());
+  for (size_t i = 0; i < text.size();) {
+    size_t j = i;
+    uint32_t cp = decode(text, &j);
+    uint32_t to = cp;
+    if (is_han(cp)) {
+      size_t lo = 0, hi = n_map_;
+      while (lo < hi) {
+        size_t mid = (lo + hi) / 2;
+        if (map_[2 * mid] < cp)
+          lo = mid + 1;
+        else
+          hi = mid;
+      }
+      if (lo < n_map_ && map_[2 * lo] == cp)
+        to = map_[2 * lo + 1];
+    }
+    if (to == cp) {
+      out.append(text, i, j - i);
+    } else if (to < 0x800) {
+      out += static_cast<char>(0xC0 | (to >> 6));
+      out += static_cast<char>(0x80 | (to & 0x3F));
+    } else if (to < 0x10000) {
+      out += static_cast<char>(0xE0 | (to >> 12));
+      out += static_cast<char>(0x80 | ((to >> 6) & 0x3F));
+      out += static_cast<char>(0x80 | (to & 0x3F));
+    } else {
+      out += static_cast<char>(0xF0 | (to >> 18));
+      out += static_cast<char>(0x80 | ((to >> 12) & 0x3F));
+      out += static_cast<char>(0x80 | ((to >> 6) & 0x3F));
+      out += static_cast<char>(0x80 | (to & 0x3F));
+    }
+    i = j;
+  }
+  return out;
+}
+
 double EnglishJudge::Score(const std::string& text) const {
   double zh = 0, en = 0;
   uint32_t h1 = 0, h2 = 0;

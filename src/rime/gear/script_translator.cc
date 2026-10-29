@@ -144,6 +144,14 @@ class ScriptTranslation : public Translation {
   bool Evaluate(Dictionary* dict, UserDictionary* user_dict);
   virtual bool Next();
   virtual an<Candidate> Peek();
+  // 蓬萊：按鍵層語言辨識的候選、排在後面的字母串和數字（ScriptTranslator::Query 排位置用，Evaluate 之後才有）
+  const vector<an<Phrase>>& keylid_candidates() const { return keylid_; }
+  set<const Candidate*> late_candidates() const {
+    set<const Candidate*> late;
+    for (const auto& c : english_late_)
+      late.insert(c.get());
+    return late;
+  }
 
  protected:
   bool CheckEmpty();
@@ -184,6 +192,8 @@ class ScriptTranslation : public Translation {
   deque<an<Phrase>> english_late_;
   // 判斷說英文句比原本的第一候選通順：english_ 的第一句排第一
   bool english_first_ = false;
+  // 按鍵層語言辨識（translator/english_keylid）的候選：不從這裡出，ScriptTranslator::Query 另外排
+  vector<an<Phrase>> keylid_;
 
   an<Phrase> candidate_ = nullptr;
   size_t candidate_index_ = 0;
@@ -208,6 +218,98 @@ class ScriptTranslation : public Translation {
 
   Corrector* corrector_;
   bool enable_correction_;
+};
+
+// 蓬萊：按鍵層語言辨識的候選（translator/english_keylid）排在第 position 個起、到那一頁結束：前面 position − 1 個
+// 照原本的順序；原本在這一頁剩下位置的字母串、數字（english_late_）先往前挪（不被擠到下一頁），接著按鍵層的候選
+// （最多 max 個），這一頁其他原本的候選和後面的照原本的順序往後。包在前文重排（ContextualTranslation）外面：
+// 重排會把同一段的詞一起按前文排序，插在裡面會把一段切成兩段，前面的順序就變了。
+// 數位置時照臺灣字形去重：後面的 simplifier@zh_hant_tw 會把「纔會」換成「才會」，uniquifier 再拿掉重複的，
+// 照原本的字數的話，按鍵層的候選會往前補到第 position − 1 個（10/30 tests-i2 有 4 題）
+class KeylidTranslation : public Translation {
+ public:
+  KeylidTranslation(an<Translation> inner,
+                    vector<an<Phrase>> keylid,
+                    set<const Candidate*> late,
+                    an<EnglishJudge> judge,
+                    size_t position,
+                    size_t page_size,
+                    size_t max)
+      : inner_(std::move(inner)),
+        keylid_(std::move(keylid)),
+        late_(std::move(late)),
+        judge_(std::move(judge)),
+        before_(position > 0 ? position - 1 : 0),
+        page_size_((std::max)(static_cast<size_t>(1), page_size)),
+        max_(max) {
+    set_exhausted(keylid_.empty() && inner_->exhausted());
+  }
+  bool Next() override {
+    if (exhausted())
+      return false;
+    Fill();
+    if (!queue_.empty())
+      queue_.pop_front();
+    else
+      inner_->Next();
+    set_exhausted(queue_.empty() && inner_->exhausted());
+    return !exhausted();
+  }
+  an<Candidate> Peek() override {
+    if (exhausted())
+      return nullptr;
+    Fill();
+    if (!queue_.empty())
+      return queue_.front();
+    return inner_->Peek();
+  }
+
+ private:
+  void Fill() {
+    if (filled_)
+      return;
+    filled_ = true;
+    set<string> texts;  // 臺灣字形，數過的
+    auto take = [&](size_t* count) {
+      auto c = inner_->Peek();
+      inner_->Next();
+      if (c && texts.insert(judge_ ? judge_->TaiwanVariants(c->text())
+                                   : c->text())
+                   .second)
+        ++*count;
+      return c;
+    };
+    size_t count = 0;
+    while (count < before_ && !inner_->exhausted()) {
+      if (auto c = take(&count))
+        queue_.push_back(c);
+    }
+    const size_t page_end =
+        (before_ / page_size_ + 1) * page_size_;  // 第 position 個那一頁的結尾
+    const size_t room = page_end - before_;
+    vector<an<Candidate>> late, rest;
+    size_t here = 0;
+    while (here < room && !inner_->exhausted()) {
+      if (auto c = take(&here))
+        (late_.count(c.get()) ? late : rest).push_back(c);
+    }
+    queue_.insert(queue_.end(), late.begin(), late.end());
+    const size_t k = (std::min)(
+        {keylid_.size(), max_, room > late.size() ? room - late.size() : 0});
+    queue_.insert(queue_.end(), keylid_.begin(), keylid_.begin() + k);
+    queue_.insert(queue_.end(), rest.begin(), rest.end());
+    set_exhausted(queue_.empty() && inner_->exhausted());
+  }
+
+  an<Translation> inner_;
+  vector<an<Phrase>> keylid_;
+  set<const Candidate*> late_;
+  an<EnglishJudge> judge_;
+  size_t before_;
+  size_t page_size_;
+  size_t max_;
+  bool filled_ = false;
+  deque<an<Candidate>> queue_;
 };
 
 // ScriptTranslator implementation
@@ -273,6 +375,30 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
       // 開頭是聲調鍵的數字（speller/digit_lead_tones，abc_segmentor 收成一段）
       config->GetBool("speller/digit_lead_tones", &digit_lead_tones_);
       config->GetString("speller/finals", &speller_finals_);
+      // 按鍵層語言辨識（tools/gen_keylid.py 產生的表）：單字表以外的英文段另外組成候選，
+      // 排在第 english_keylid_position 個起，不排第一；只在有判斷表時
+      string english_keylid;
+      if (english_judge_ &&
+          config->GetString(name_space_ + "/english_keylid", &english_keylid) &&
+          !english_keylid.empty()) {
+        english_keylid_ = EnglishLexicon::RequireKeylid(english_keylid);
+      }
+      config->GetDouble(name_space_ + "/english_keylid_switch",
+                        &english_keylid_switch_);
+      config->GetInt(name_space_ + "/english_keylid_min_length",
+                     &english_keylid_min_length_);
+      config->GetDouble(name_space_ + "/english_keylid_margin",
+                        &english_keylid_margin_);
+      config->GetInt(name_space_ + "/english_keylid_beam", &english_keylid_beam_);
+      config->GetInt(name_space_ + "/english_keylid_candidates",
+                     &english_keylid_candidates_);
+      config->GetInt(name_space_ + "/english_keylid_position",
+                     &english_keylid_position_);
+      config->GetInt(name_space_ + "/english_keylid_max", &english_keylid_max_);
+      keylid_params_.switch_penalty = english_keylid_switch_;
+      keylid_params_.min_length = english_keylid_min_length_;
+      keylid_params_.margin = english_keylid_margin_;
+      keylid_params_.beam = english_keylid_beam_;
     }
     poet_.reset(new Poet(language(), config));
     // Jason 原型：學習紀錄排序公式、撤銷學習的時間窗
@@ -419,6 +545,15 @@ an<Translation> ScriptTranslator::Query(const string& input,
   an<Translation> deduped = New<DistinctTranslation>(result);
   if (contextual_suggestions_) {
     deduped = poet_->ContextualWeighted(deduped, input, segment.start, this);
+  }
+  // 蓬萊：按鍵層語言辨識的候選排在第 english_keylid_position 個起（前文重排之後才插，前面的順序不變）
+  if (!result->keylid_candidates().empty()) {
+    deduped = New<KeylidTranslation>(
+        deduped, result->keylid_candidates(), result->late_candidates(),
+        english_judge_,
+        static_cast<size_t>((std::max)(1, english_keylid_position_)),
+        static_cast<size_t>(engine_->schema()->page_size()),
+        static_cast<size_t>((std::max)(0, english_keylid_max_)));
   }
   if (forget)
     return forget + deduped;
@@ -1407,7 +1542,18 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
                          (std::max)(1, translator_->digit_min_length()));
   for (size_t i = 0; digits && i < n; ++i)
     digits = is_digit(input_[i]);
-  if (spans.empty() && !digits)
+  // 1c. 按鍵層語言辨識（translator/english_keylid）：有一串連續字母至少 english_keylid_min_length 個才算
+  const auto& keylid = translator_->english_keylid();
+  bool use_keylid = false;
+  if (judge && keylid) {
+    const size_t lmin = static_cast<size_t>(
+        (std::max)(1, translator_->keylid_params().min_length));
+    for (size_t i = 0, run = 0; i < n && !use_keylid; ++i) {
+      run = is_lowercase_letter(input_[i]) ? run + 1 : 0;
+      use_keylid = run >= lmin;
+    }
+  }
+  if (spans.empty() && !digits && !use_keylid)
     return;
   // 收了連著的聲調鍵（speller/digit_tones）：中文切不開整段，只有數字讀得完，直接排第一
   const bool digit_tones = digits && translator_->HasDigitTonePair(input_);
@@ -1463,6 +1609,43 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
   };
   const string preceding_text = translator_->GetPrecedingText(start_);
   map<pair<size_t, size_t>, an<WordGraph>> cache;
+  // 一種切法組一句（中文段組不出來時回傳 nullptr）
+  auto compose = [&](const vector<EnglishSpan>& config) -> an<Sentence> {
+    WordGraph graph;
+    size_t pos = 0;
+    for (const auto& s : config) {
+      if (s.start > pos &&
+          !EnrollSegment(dict, user_dict, pos, s.start, &cache, &graph))
+        return nullptr;
+      graph[s.start][s.end].push_back(make_entry(s));
+      pos = s.end;
+    }
+    if (pos < n && !EnrollSegment(dict, user_dict, pos, n, &cache, &graph))
+      return nullptr;
+    auto sentence = poet_->MakeSentence(graph, n, preceding_text);
+    if (!sentence || sentence->empty())
+      return nullptr;
+    // 組字區：中文段照 preedit_format 顯示注音，英文照字面，詞跟詞之間放分隔符號
+    string preedit;
+    vector<size_t> vertices{start_};
+    size_t p = 0;
+    for (size_t k = 0; k < sentence->size(); ++k) {
+      size_t len = sentence->word_lengths()[k];
+      bool english = false;
+      for (const auto& s : config)
+        english = english || (s.start == p && s.end == p + len);
+      if (k > 0)
+        preedit += separator;
+      preedit += english ? input_.substr(p, len)
+                         : translator_->FormatPreedit(input_.substr(p, len));
+      p += len;
+      vertices.push_back(start_ + p);
+    }
+    sentence->Offset(start_);
+    sentence->set_preedit(preedit);
+    sentence->set_syllabifier(New<EnglishSyllabifier>(std::move(vertices)));
+    return sentence;
+  };
   vector<Made> made;
   an<Phrase> word;
   for (const auto& config : configs) {
@@ -1491,44 +1674,9 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
             vector<size_t>{start_, start_ + last.end}));
       }
     }
-    WordGraph graph;
-    size_t pos = 0;
-    bool ok = true;
-    for (const auto& s : config) {
-      if (s.start > pos &&
-          !EnrollSegment(dict, user_dict, pos, s.start, &cache, &graph)) {
-        ok = false;
-        break;
-      }
-      graph[s.start][s.end].push_back(make_entry(s));
-      pos = s.end;
-    }
-    if (ok && pos < n)
-      ok = EnrollSegment(dict, user_dict, pos, n, &cache, &graph);
-    if (!ok)
+    auto sentence = compose(config);
+    if (!sentence)
       continue;
-    auto sentence = poet_->MakeSentence(graph, n, preceding_text);
-    if (!sentence || sentence->empty())
-      continue;
-    // 組字區：中文段照 preedit_format 顯示注音，英文照字面，詞跟詞之間放分隔符號
-    string preedit;
-    vector<size_t> vertices{start_};
-    size_t p = 0;
-    for (size_t k = 0; k < sentence->size(); ++k) {
-      size_t len = sentence->word_lengths()[k];
-      bool english = false;
-      for (const auto& s : config)
-        english = english || (s.start == p && s.end == p + len);
-      if (k > 0)
-        preedit += separator;
-      preedit += english ? input_.substr(p, len)
-                         : translator_->FormatPreedit(input_.substr(p, len));
-      p += len;
-      vertices.push_back(start_ + p);
-    }
-    sentence->Offset(start_);
-    sentence->set_preedit(preedit);
-    sentence->set_syllabifier(New<EnglishSyllabifier>(std::move(vertices)));
     made.push_back({sentence, &config, sentence->weight()});
   }
 
@@ -1544,10 +1692,10 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
   //      輪到下一個英文候選判斷。
   bool promote = false;
   bool whole_word = false;
+  vector<Reading> readings;
   if (judge) {
     CheckEmpty();  // 建構時是 exhausted，Evaluate 最後才更新；這時 english_ 還是空的
     auto first = PeekFirstCandidate();
-    vector<Reading> readings;
     auto add_reading = [&](const an<Phrase>& p) {
       Reading r;
       r.text = p->text();
@@ -1693,6 +1841,66 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
   }
   if (word && seen.insert(word->text()).second)
     english_.push_back(word);
+
+  // 6. 按鍵層語言辨識：同一串按鍵比中文注音鍵模型和英文字母模型（兩狀態分段 Viterbi），強制某一段是英文的最佳切法
+  //    跟最佳切法差 english_keylid_margin 以內的，照差距取前 english_keylid_candidates 段（單字表、字母串已經有的
+  //    切法不算，輪到下一段）。每段照「強制這段是英文」的那條切法組一句：切法裡其他的英文段也照字面（單字表的詞用
+  //    單字表的權重）。原本的第一候選已經有這幾個英文的、跟前面的候選同一句的不要。不判斷、不排第一：
+  //    另外放在 keylid_，ScriptTranslator::Query 排在第 english_keylid_position 個起
+  if (!use_keylid)
+    return;
+  auto lattice = keylid->Analyze(input_, translator_->keylid_params());
+  set<pair<size_t, size_t>> known;
+  for (const auto& s : spans)
+    known.insert({s.start, s.end});
+  set<vector<pair<size_t, size_t>>> tried;
+  const size_t max_keylid = static_cast<size_t>(
+      (std::max)(0, translator_->english_keylid_max()));
+  int left = translator_->english_keylid_candidates();
+  for (const auto& span : lattice->spans()) {
+    if (left <= 0 || keylid_.size() >= max_keylid)
+      break;
+    if (known.count({span.start, span.end}))
+      continue;
+    --left;
+    auto path = lattice->Path(span);
+    if (!tried.insert(path).second)
+      continue;
+    vector<EnglishSpan> config;
+    for (const auto& seg : path) {
+      double zipf = 0;
+      if (lexicon->Find(input_.substr(seg.first, seg.second - seg.first),
+                        &zipf))
+        config.push_back({seg.first, seg.second, zipf});
+      else
+        config.push_back(
+            {seg.first, seg.second, translator_->english_min_zipf(), false});
+    }
+    bool all_in_first = !readings.empty();
+    for (const auto& s : config) {
+      all_in_first =
+          all_in_first && readings[0].lower.find(input_.substr(
+                              s.start, s.length())) != string::npos;
+    }
+    if (all_in_first)
+      continue;
+    an<Phrase> cand;
+    if (config.size() == 1 && config[0].start == 0 && config[0].end == n) {
+      auto entry = make_entry(config[0]);
+      entry->preedit = entry->text;
+      cand = New<Phrase>(translator_->language(), "keylid", start_, start_ + n,
+                         entry);
+      cand->set_syllabifier(
+          New<EnglishSyllabifier>(vector<size_t>{start_, start_ + n}));
+    } else {
+      cand = compose(config);
+      if (!cand)
+        continue;
+      cand->set_type("keylid");
+    }
+    if (seen.insert(cand->text()).second)
+      keylid_.push_back(cand);
+  }
 }
 
 }  // namespace rime

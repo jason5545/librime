@@ -11,6 +11,7 @@
 #include <rime/translation.h>
 #include <rime/translator.h>
 #include <rime/algo/algebra.h>
+#include <rime/gear/english_keylid.h>
 #include <rime/gear/memory.h>
 #include <rime/gear/translator_commons.h>
 
@@ -79,6 +80,12 @@ class ScriptTranslator : public Translator,
   bool digit_runs() const { return digit_runs_; }
   int digit_min_length() const { return digit_min_length_; }
   double digit_penalty() const { return digit_penalty_; }
+  // 按鍵層語言辨識（translator/english_keylid）：中文注音鍵模型對英文字母模型找出單字表以外的英文段，另外組成候選，
+  // 排在第 english_keylid_position 個起、最多 english_keylid_max 個（原本前面的候選不動、不排第一）。要有判斷表才有作用
+  const an<EnglishKeylid>& english_keylid() const { return english_keylid_; }
+  const EnglishKeylid::Params& keylid_params() const { return keylid_params_; }
+  int english_keylid_candidates() const { return english_keylid_candidates_; }
+  int english_keylid_max() const { return english_keylid_max_; }
   // 數字串裡收了連著的聲調鍵（speller/digit_tones）：中文切不開整段，數字直接排第一
   bool HasDigitTonePair(const string& input) const;
   // 開頭是聲調鍵的數字（speller/digit_lead_tones）：出得了數字候選時，開頭聲調鍵那段 raw 加標籤給 abc_segmentor 看；
@@ -147,6 +154,16 @@ class ScriptTranslator : public Translator,
   double digit_penalty_ = 4.0;
   bool digit_tones_ = false;
   bool digit_lead_tones_ = false;
+  an<EnglishKeylid> english_keylid_;
+  double english_keylid_switch_ = 4.0;
+  int english_keylid_min_length_ = 2;
+  double english_keylid_margin_ = 8.0;
+  int english_keylid_beam_ = 64;
+  EnglishKeylid::Params keylid_params_;
+  int english_keylid_candidates_ = 8;
+  int english_keylid_position_ = 6;
+  int english_keylid_max_ = 4;
+  int page_size_ = 5;
   string speller_finals_;
   bool english_letters_ready_ = false;
   vector<int32_t> english_letters_;  // a–z 的假音節；-1 表示詞典裡沒有

@@ -31,6 +31,8 @@ class EnglishJudge {
   double Score(const std::string& text) const;
   // 一段英文（不分大小寫）的字母 log 機率
   double EnglishLogp(const std::string& word) const;
+  // 漢字照表裡的 TWVariants 單字對照換成臺灣字形（simplifier@zh_hant_tw 用的也是這份對照），其他字元不動
+  std::string TaiwanVariants(const std::string& text) const;
   size_t file_size() const { return size_; }
 
  private:

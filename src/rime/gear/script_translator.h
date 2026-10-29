@@ -81,6 +81,11 @@ class ScriptTranslator : public Translator,
   double digit_penalty() const { return digit_penalty_; }
   // 數字串裡收了連著的聲調鍵（speller/digit_tones）：中文切不開整段，數字直接排第一
   bool HasDigitTonePair(const string& input) const;
+  // 開頭是聲調鍵的數字（speller/digit_lead_tones）：出得了數字候選時，開頭聲調鍵那段 raw 加標籤給 abc_segmentor 看；
+  // 收成一段之後只給數字候選
+  bool DigitLeadReady() const;
+  an<Translation> TranslateDigitLead(const string& input,
+                                     const Segment& segment);
   // 英文字母的假音節（詞典裡「注音＋~」的音節，只能簡拼），拼成英文詞的碼；
   // 有字母找不到時回傳 false，code 不動（這個詞就不寫學習紀錄）
   bool EnglishCode(const string& word, Code* code);
@@ -138,6 +143,7 @@ class ScriptTranslator : public Translator,
   int digit_min_length_ = 2;
   double digit_penalty_ = 4.0;
   bool digit_tones_ = false;
+  bool digit_lead_tones_ = false;
   string speller_finals_;
   bool english_letters_ready_ = false;
   vector<int32_t> english_letters_;  // a–z 的假音節；-1 表示詞典裡沒有

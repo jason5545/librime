@@ -135,6 +135,8 @@ Speller::Speller(const Ticket& ticket)
     // 蓬萊：整段都是數字鍵時，連著的聲調鍵也收（0912345678 的 4、7）。只在翻譯器出得了數字候選時收
     // （translator/digit_runs，見 AcceptsDigitTone），不然收進來也只剩中文切不開的半句
     config->GetBool("speller/digit_tones", &digit_tones_);
+    // 開頭是聲調鍵的數字收成一段（abc_segmentor）：開頭的聲調鍵不算連著的，後面的空白照舊是一聲
+    config->GetBool("speller/digit_lead_tones", &digit_lead_tones_);
   }
   if (initials_.empty()) {
     initials_ = alphabet_;
@@ -165,7 +167,7 @@ ProcessResult Speller::ProcessKeyEvent(const KeyEvent& key_event) {
   if (is_initial && AutoSelectAtMaxCodeLength(ctx)) {
     DLOG(INFO) << "auto-select at max code length.";
   } else if ((auto_clear_ == kClearMaxLength || auto_clear_ == kClearManual) &&
-             AutoClear(ctx)) {
+             !KeepsDigitLead(ctx, ch) && AutoClear(ctx)) {
     DLOG(INFO) << "auto-clear at max code when no candidate.";
   }
   // make a backup of previous conversion before modifying input
@@ -206,6 +208,18 @@ bool Speller::AcceptsDigitTone(Context* ctx, int ch) {
   return has_whole_digit_candidate(ctx, caret);
 }
 
+// 蓬萊（speller/digit_lead_tones）：開頭的聲調鍵單獨成一段 raw、翻譯器加了 digit_lead（出得了數字），接著按數字鍵時
+// 不 AutoClear：那段沒有選單是因為還沒接數字，接上之後 abc_segmentor 會收成一段（auto_clear: manual 時 30 不會剩 0）
+bool Speller::KeepsDigitLead(Context* ctx, int ch) {
+  if (!digit_lead_tones_ || !is_digit(ch) || belongs_to(ch, finals_))
+    return false;
+  const string& input = ctx->input();
+  const Composition& comp = ctx->composition();
+  return ctx->caret_pos() == input.length() && !comp.empty() &&
+         comp.back().start == 0 && comp.back().end == input.length() &&
+         comp.back().HasTag("raw") && comp.back().HasTag("digit_lead");
+}
+
 // 整段輸入都是數字鍵、組字區只有一段，而且裡面有連著的聲調鍵（只有 AcceptsDigitTone 收得進來）
 bool Speller::InDigitToneRun(Context* ctx) {
   if (!digit_tones_)
@@ -214,7 +228,12 @@ bool Speller::InDigitToneRun(Context* ctx) {
   if (ctx->caret_pos() != input.length() || !all_digits(input) ||
       !whole_segment(ctx, input.length()))
     return false;
-  for (size_t i = 1; i < input.length(); ++i) {
+  size_t i = 1;
+  // 蓬萊（speller/digit_lead_tones）：3ˇ4ˋ0 的 34 是開頭的聲調鍵，不是 AcceptsDigitTone 收進來的
+  while (digit_lead_tones_ && i < input.length() &&
+         belongs_to(input[i - 1], finals_))
+    ++i;
+  for (; i < input.length(); ++i) {
     if (belongs_to(input[i], finals_) && belongs_to(input[i - 1], finals_))
       return true;
   }

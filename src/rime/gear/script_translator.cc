@@ -39,6 +39,9 @@
 
 namespace rime {
 
+// 蓬萊（speller/digit_lead_tones）：跟 abc_segmentor 同一個標籤
+static const char kDigitLeadTag[] = "digit_lead";
+
 namespace {
 
 struct SyllabifyTask {
@@ -266,6 +269,8 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
       config->GetDouble(name_space_ + "/digit_penalty", &digit_penalty_);
       // 數字串裡連著的聲調鍵（speller 收進來的，speller/digit_tones）
       config->GetBool("speller/digit_tones", &digit_tones_);
+      // 開頭是聲調鍵的數字（speller/digit_lead_tones，abc_segmentor 收成一段）
+      config->GetBool("speller/digit_lead_tones", &digit_lead_tones_);
       config->GetString("speller/finals", &speller_finals_);
     }
     poet_.reset(new Poet(language(), config));
@@ -358,6 +363,23 @@ an<Translation> ScriptTranslator::Query(const string& input,
                                      string(), comment);
     cand->set_quality(1000);
     forget = New<UniqueTranslation>(cand);
+  }
+  // 蓬萊：開頭是聲調鍵的數字（speller/digit_lead_tones）
+  if (segment.start == 0 && DigitLeadReady()) {
+    if (segment.HasTag("raw")) {
+      // 開頭的聲調鍵單獨成一段：告訴 abc_segmentor 接著打數字鍵時可以收成一段（上游 reverse_lookup 也這樣改 prompt）
+      bool tones = !input.empty();
+      for (char c : input) {
+        tones = tones && c >= '0' && c <= '9' &&
+                speller_finals_.find(c) != string::npos;
+      }
+      if (tones)
+        const_cast<Segment&>(segment).tags.insert(kDigitLeadTag);
+    } else if (segment.HasTag(kDigitLeadTag)) {
+      // abc_segmentor 收成一段的（只標 digit_lead，其他翻譯器不查）
+      auto digits = TranslateDigitLead(input, segment);
+      return forget ? forget + digits : digits;
+    }
   }
   if (!dict_ || !dict_->loaded())
     return forget;
@@ -1218,6 +1240,27 @@ inline bool is_digit(char c) {
 }
 
 }  // namespace
+
+// 跟整段數字鍵（translator/digit_runs）出得了數字候選的條件相同：中英混輸、判斷表、digit_runs 都要有
+bool ScriptTranslator::DigitLeadReady() const {
+  return digit_lead_tones_ && english_lexicon_ && english_judge_ &&
+         digit_runs_ && english_max_sentences_ > 0;
+}
+
+// 開頭的聲調鍵打不出中文、後面又都是不帶聲調的數字鍵，只給數字（跟 digit_runs 的整段數字同一種候選，
+// 選了不寫學習紀錄）。至少兩位，不看 digit_min_length：那是防兩鍵的中文詞（等等、安裝），開頭是聲調鍵就不會是
+an<Translation> ScriptTranslator::TranslateDigitLead(const string& input,
+                                                     const Segment& segment) {
+  auto entry = New<DictEntry>();
+  entry->text = input;  // 數字沒有假音節：碼是空的
+  entry->weight = -9.0 * std::log(10.0) + english_weight_;
+  entry->preedit = input;
+  auto digits = New<Phrase>(language(), "digits", segment.start, segment.end,
+                            entry);
+  digits->set_syllabifier(New<EnglishSyllabifier>(
+      vector<size_t>{segment.start, segment.end}));
+  return New<UniqueTranslation>(digits);
+}
 
 bool ScriptTranslation::EnrollSegment(
     Dictionary* dict,

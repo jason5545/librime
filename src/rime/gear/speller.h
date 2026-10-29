@@ -39,6 +39,7 @@ class Speller : public Processor {
   // 蓬萊：整段數字鍵裡連著的聲調鍵也收（speller/digit_tones）
   bool AcceptsDigitTone(Context* ctx, int ch);
   bool InDigitToneRun(Context* ctx);
+  bool KeepsDigitLead(Context* ctx, int ch);
 
   string alphabet_;
   string delimiters_;
@@ -50,6 +51,7 @@ class Speller : public Processor {
   boost::regex auto_select_pattern_;
   AutoClearMethod auto_clear_ = kClearNone;
   bool digit_tones_ = false;
+  bool digit_lead_tones_ = false;
 };
 
 }  // namespace rime

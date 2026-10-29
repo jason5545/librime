@@ -25,6 +25,11 @@ class AbcSegmentor : public Segmentor {
   set<string> extra_tags_;
   // 蓬萊：整段數字鍵裡連著的聲調鍵也算進這一段（speller/digit_tones）
   bool digit_tones_ = false;
+  // 蓬萊：開頭是聲調鍵的數字（30、6912）收成一段（speller/digit_lead_tones）
+  bool JoinDigitLead(Segmentation* segmentation);
+  bool IsDigitLead(const string& input) const;
+  bool digit_lead_tones_ = false;
+  bool digit_lead_ready_ = false;  // 看過翻譯器加的標籤：出得了數字候選
 };
 
 }  // namespace rime

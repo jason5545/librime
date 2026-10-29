@@ -208,6 +208,9 @@ class TranslatorOptions {
   string delimiters_;
   vector<string> tags_{"abc"};  // invariant: non-empty
   bool contextual_suggestions_ = false;
+  // 蓬萊：新輸入開頭取前文時，跳過送出紀錄尾巴的空段落（Return 送出時留下的空字串 raw），
+  // 接到上一筆送出的文字；false＝原版（拿到空字串，等於沒有前文）
+  bool last_commit_as_context_ = true;
   bool enable_completion_ = true;
   bool strict_spelling_ = false;
   double initial_quality_ = 0.;

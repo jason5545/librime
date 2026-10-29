@@ -521,9 +521,20 @@ string ScriptTranslator::Spell(const Code& code) {
 }
 
 string ScriptTranslator::GetPrecedingText(size_t start) const {
-  return !contextual_suggestions_ ? string()
-         : start > 0 ? engine_->context()->composition().GetTextBefore(start)
-                     : engine_->context()->commit_history().latest_text();
+  if (!contextual_suggestions_)
+    return string();
+  if (start > 0)
+    return engine_->context()->composition().GetTextBefore(start);
+  const auto& history = engine_->context()->commit_history();
+  if (!last_commit_as_context_)
+    return history.latest_text();
+  // 蓬萊：fluency_editor 用 Return 送出時，組字區尾巴的空段落會被記成文字是空字串的 raw，
+  // 原版拿它當前文，每一筆新輸入開頭都沒有前文。跳過空的紀錄，接上一筆真的送出的文字
+  for (auto it = history.rbegin(); it != history.rend(); ++it) {
+    if (!it->text.empty())
+      return it->text;
+  }
+  return string();
 }
 
 bool ScriptTranslator::UpdateElements(const CommitEntry& commit_entry) {

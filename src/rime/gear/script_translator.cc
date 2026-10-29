@@ -429,6 +429,13 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
                 << " unit=" << sc.unit << " prior_weight=" << sc.prior_weight;
     }
   }
+  // 蓬萊：開頭是這幾個鍵、後面不是聲調鍵時，整段照按鍵原字排第一（大千的 / 是 ㄥ，ㄥ 開頭的音節只有「鞥」，
+  // 組不成中文；要的是斜線指令 /loop）。空字串＝關
+  if (Config* config = engine_->schema()->config()) {
+    if (config->GetString(name_space_ + "/raw_lead_keys", &raw_lead_keys_) &&
+        !raw_lead_keys_.empty())
+      config->GetString("speller/finals", &speller_finals_);
+  }
   // 蓬萊：忘掉上一筆。輸入剛好是 forget_last_code 時第一候選是「〔忘掉：上一筆〕」，
   // 選它（空白鍵、Shift+1）或送出它（Return）就刪掉上一筆送出寫進的學習紀錄，不送出文字
   if (Config* config = engine_->schema()->config()) {
@@ -525,6 +532,11 @@ an<Translation> ScriptTranslator::Query(const string& input,
     return forget;
   DLOG(INFO) << "input = '" << input << "', [" << segment.start << ", "
              << segment.end << ")";
+  // 蓬萊：開頭是 raw_lead_keys 的鍵（/）：組不成中文，只給按鍵原字
+  if (segment.start == 0 && RawLead(input)) {
+    auto raw = TranslateRawLead(input, segment);
+    return forget ? forget + raw : raw;
+  }
 
   FinishSession();
   RefreshBlacklist();
@@ -1433,6 +1445,26 @@ an<Translation> ScriptTranslator::TranslateDigitLead(const string& input,
   digits->set_syllabifier(New<EnglishSyllabifier>(
       vector<size_t>{segment.start, segment.end}));
   return New<UniqueTranslation>(digits);
+}
+
+bool ScriptTranslator::RawLead(const string& input) const {
+  return !raw_lead_keys_.empty() && !input.empty() &&
+         raw_lead_keys_.find(input[0]) != string::npos &&
+         (input.length() == 1 ||
+          speller_finals_.find(input[1]) == string::npos);
+}
+
+// 跟整段數字同一種做法：碼是空的，選了不寫學習紀錄；組字區顯示按鍵原字
+an<Translation> ScriptTranslator::TranslateRawLead(const string& input,
+                                                   const Segment& segment) {
+  auto entry = New<DictEntry>();
+  entry->text = input;
+  entry->preedit = input;
+  auto raw = New<Phrase>(language(), "raw_lead", segment.start, segment.end,
+                         entry);
+  raw->set_syllabifier(New<EnglishSyllabifier>(
+      vector<size_t>{segment.start, segment.end}));
+  return New<UniqueTranslation>(raw);
 }
 
 bool ScriptTranslation::EnrollSegment(

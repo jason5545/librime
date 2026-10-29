@@ -93,6 +93,10 @@ class ScriptTranslator : public Translator,
   bool DigitLeadReady() const;
   an<Translation> TranslateDigitLead(const string& input,
                                      const Segment& segment);
+  // 開頭是 translator/raw_lead_keys 裡的鍵（/，ㄥ 開頭的音節只有「鞥」）、第二鍵不是聲調鍵：
+  // 組不成中文，只給按鍵原字（斜線指令 /loop）
+  bool RawLead(const string& input) const;
+  an<Translation> TranslateRawLead(const string& input, const Segment& segment);
   // 英文字母的假音節（詞典裡「注音＋~」的音節，只能簡拼），拼成英文詞的碼；
   // 有字母找不到時回傳 false，code 不動（這個詞就不寫學習紀錄）
   bool EnglishCode(const string& word, Code* code);
@@ -154,6 +158,7 @@ class ScriptTranslator : public Translator,
   double digit_penalty_ = 4.0;
   bool digit_tones_ = false;
   bool digit_lead_tones_ = false;
+  string raw_lead_keys_;
   an<EnglishKeylid> english_keylid_;
   double english_keylid_switch_ = 4.0;
   int english_keylid_min_length_ = 2;

@@ -461,6 +461,23 @@ bool UserDictionary::UpdateEntry(const DictEntry& entry,
   return db_->Update(key, v.Pack());
 }
 
+bool UserDictionary::FetchCommits(const DictEntry& entry, int* commits) {
+  if (!loaded())
+    return false;
+  string code_str(entry.custom_code);
+  if (code_str.empty() && !TranslateCodeToString(entry.code, &code_str))
+    return false;
+  string value;
+  if (!db_->Fetch(code_str + '\t' + entry.text, &value))
+    return false;
+  UserDbValue v(value);
+  if (v.commits < 0)
+    return false;
+  if (commits)
+    *commits = v.commits;
+  return true;
+}
+
 bool UserDictionary::UpdateTickCount(TickCount increment) {
   tick_ += increment;
   try {

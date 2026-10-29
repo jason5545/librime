@@ -82,6 +82,8 @@ class UserDictionary : public Class<UserDictionary, const Ticket&> {
                      size_t limit = 0,
                      string* resume_key = NULL);
   bool UpdateEntry(const DictEntry& entry, int commits);
+  // 蓬萊：學習紀錄裡這個詞（文字＋碼）的送出次數；沒有或已經刪掉回傳 false
+  bool FetchCommits(const DictEntry& entry, int* commits);
   bool UpdateEntry(const DictEntry& entry,
                    int commits,
                    const string& new_entry_prefix);

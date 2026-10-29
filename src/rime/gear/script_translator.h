@@ -80,6 +80,27 @@ class ScriptTranslator : public Translator,
  protected:
   // 蓬萊：沒有學習紀錄的詞典詞（兩個字以上）刪除時改成隱藏（translator/dictionary_exclude_file）
   bool ExcludeOnDelete(const an<Phrase>& phrase) override;
+  // 蓬萊：忘掉上一筆（translator/forget_last_code）
+  struct Written {
+    string text;
+    Code code;
+    bool whole;  // true：送出的整筆（送出次數 +1）；false：整句裡的詞（送出次數 +0）
+  };
+  struct Remembered {
+    string text;  // 實際送出的文字
+    vector<Written> written;
+  };
+  void WriteUserEntry(const DictEntry& entry, int commits);
+  deque<Remembered>& forget_history();
+  bool ForgetSelected(Context* ctx) const;
+  void OnSelectForForget(Context* ctx);
+  void OnCommitForForget(Context* ctx);
+  void ForgetLast(Context* ctx);
+  string forget_last_code_;
+  int forget_last_history_ = 10;
+  vector<Written> pending_;  // 這次送出寫進學習紀錄的
+  connection forget_select_connection_;
+  connection forget_commit_connection_;
 
   int max_homophones_ = 1;
   int spelling_hints_ = 0;

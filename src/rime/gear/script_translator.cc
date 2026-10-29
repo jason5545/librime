@@ -288,6 +288,22 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
                 << " unit=" << sc.unit << " prior_weight=" << sc.prior_weight;
     }
   }
+  // 蓬萊：忘掉上一筆。輸入剛好是 forget_last_code 時第一候選是「〔忘掉：上一筆〕」，
+  // 選它（空白鍵、Shift+1）或送出它（Return）就刪掉上一筆送出寫進的學習紀錄，不送出文字
+  if (Config* config = engine_->schema()->config()) {
+    if (config->GetString(name_space_ + "/forget_last_code",
+                          &forget_last_code_) &&
+        !forget_last_code_.empty()) {
+      config->GetInt(name_space_ + "/forget_last_history",
+                     &forget_last_history_);
+      Context* ctx = engine_->context();
+      // 接在 Memory 之後：送出時先寫學習紀錄，再記下這一筆
+      forget_commit_connection_ = ctx->commit_notifier().connect(
+          [this](Context* ctx) { OnCommitForForget(ctx); });
+      forget_select_connection_ = ctx->select_notifier().connect(
+          [this](Context* ctx) { OnSelectForForget(ctx); });
+    }
+  }
   if (enable_correction_) {
     if (auto* corrector = Corrector::Require("corrector")) {
       corrector_.reset(corrector->Create(ticket));
@@ -309,6 +325,8 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
 }
 
 ScriptTranslator::~ScriptTranslator() {
+  forget_select_connection_.disconnect();
+  forget_commit_connection_.disconnect();
   if (engine_ && raw_input_format_ &&
       engine_->context()->raw_input_format() == raw_input_format_) {
     engine_->context()->set_raw_input_format(nullptr);
@@ -317,10 +335,25 @@ ScriptTranslator::~ScriptTranslator() {
 
 an<Translation> ScriptTranslator::Query(const string& input,
                                         const Segment& segment) {
+  // 蓬萊：忘掉上一筆的指令碼可能不是合法的拼法（77 是兩個輕聲鍵，不會標成 abc），所以先檢查
+  an<Translation> forget;
+  if (!forget_last_code_.empty() && input == forget_last_code_ &&
+      segment.start == 0 &&
+      segment.end == engine_->context()->input().length()) {
+    const auto& history = forget_history();
+    string comment = history.empty()
+                         ? string("〔沒有可忘掉的紀錄〕")
+                         : "〔忘掉：" + history.back().text + "〕";
+    // 候選文字是空的：真的送出也只送出空字串
+    auto cand = New<SimpleCandidate>("forget_last", segment.start, segment.end,
+                                     string(), comment);
+    cand->set_quality(1000);
+    forget = New<UniqueTranslation>(cand);
+  }
   if (!dict_ || !dict_->loaded())
-    return nullptr;
+    return forget;
   if (!segment.HasAnyTagIn(tags_))
-    return nullptr;
+    return forget;
   DLOG(INFO) << "input = '" << input << "', [" << segment.start << ", "
              << segment.end << ")";
 
@@ -337,12 +370,14 @@ an<Translation> ScriptTranslator::Query(const string& input,
       max_sentences_, sentence_cutoff_threshold_);
   if (!result || !result->Evaluate(
                      dict_.get(), enable_user_dict ? user_dict_.get() : NULL)) {
-    return nullptr;
+    return forget;
   }
-  auto deduped = New<DistinctTranslation>(result);
+  an<Translation> deduped = New<DistinctTranslation>(result);
   if (contextual_suggestions_) {
-    return poet_->ContextualWeighted(deduped, input, segment.start, this);
+    deduped = poet_->ContextualWeighted(deduped, input, segment.start, this);
   }
+  if (forget)
+    return forget + deduped;
   return deduped;
 }
 
@@ -450,7 +485,7 @@ bool ScriptTranslator::UpdateElements(const CommitEntry& commit_entry) {
       // 蓬萊：沒有碼的英文詞（詞典裡沒有它的假音節）不寫
       if (e->code.empty())
         continue;
-      user_dict_->UpdateEntry(*e, 0);
+      WriteUserEntry(*e, 0);
     }
   }
   return true;
@@ -481,8 +516,94 @@ bool ScriptTranslator::Memorize(const CommitEntry& commit_entry) {
     if (e && e->code.empty() && !e->text.empty())
       return true;
   }
-  user_dict_->UpdateEntry(commit_entry, 1);
+  WriteUserEntry(commit_entry, 1);
   return true;
+}
+
+void ScriptTranslator::WriteUserEntry(const DictEntry& entry, int commits) {
+  user_dict_->UpdateEntry(entry, commits);
+  if (!forget_last_code_.empty())
+    pending_.push_back({entry.text, entry.code, commits > 0});
+}
+
+deque<ScriptTranslator::Remembered>& ScriptTranslator::forget_history() {
+  // 所有 session 共用（在 A 程式送出、到 B 程式忘掉也可以），照學習紀錄分開
+  static map<string, deque<Remembered>> histories;
+  return histories[user_dict_ ? user_dict_->name() : string()];
+}
+
+bool ScriptTranslator::ForgetSelected(Context* ctx) const {
+  for (const auto& seg : ctx->composition()) {
+    auto cand = Candidate::GetGenuineCandidate(seg.GetSelectedCandidate());
+    if (cand && cand->type() == "forget_last")
+      return true;
+  }
+  return false;
+}
+
+void ScriptTranslator::OnSelectForForget(Context* ctx) {
+  if (!ForgetSelected(ctx))
+    return;
+  ForgetLast(ctx);
+  ctx->Clear();
+}
+
+void ScriptTranslator::OnCommitForForget(Context* ctx) {
+  if (ForgetSelected(ctx)) {
+    pending_.clear();
+    ForgetLast(ctx);
+    return;
+  }
+  if (pending_.empty())
+    return;
+  auto& history = forget_history();
+  history.push_back({ctx->GetCommitText(), std::move(pending_)});
+  pending_.clear();
+  while (!history.empty() &&
+         static_cast<int>(history.size()) > (std::max)(1, forget_last_history_))
+    history.pop_front();
+}
+
+// 刪掉上一筆送出寫進的學習紀錄：整筆一律刪；整句裡的詞只刪送出次數還是 0 的
+// （自己單獨選過的詞保留）。結果放在 context 的 forget_last 屬性：
+// 「forgotten<Tab>文字」「gone<Tab>文字」（學習紀錄裡已經沒有）「none<Tab>」（沒有可忘掉的）
+void ScriptTranslator::ForgetLast(Context* ctx) {
+  auto& history = forget_history();
+  if (history.empty() || !user_dict_ || user_dict_->readonly()) {
+    ctx->set_property("forget_last", "none\t");
+    return;
+  }
+  Remembered item = std::move(history.back());
+  history.pop_back();
+  FinishSession();  // 送出的交易先寫進去，才不會被之後的寫入蓋回來
+  set<string> wholes;
+  for (const auto& w : item.written) {
+    if (w.whole)
+      wholes.insert(w.text);
+  }
+  int removed = 0;
+  set<pair<string, Code>> done;
+  for (const auto& w : item.written) {
+    if (!done.insert({w.text, w.code}).second)
+      continue;
+    if (!w.whole && wholes.count(w.text))
+      continue;
+    DictEntry entry;
+    entry.text = w.text;
+    entry.code = w.code;
+    int commits = 0;
+    if (!user_dict_->FetchCommits(entry, &commits))
+      continue;
+    if (!w.whole && commits > 0)
+      continue;
+    user_dict_->UpdateEntry(entry, -1);
+    ++removed;
+  }
+  FinishSession();
+  LOG(INFO) << "forget_last: '" << item.text << "', " << removed
+            << " entries removed.";
+  ctx->set_property("forget_last",
+                    (removed > 0 ? "forgotten\t" : "gone\t") + item.text);
 }
 
 bool ScriptTranslator::EnglishCode(const string& word, Code* code) {

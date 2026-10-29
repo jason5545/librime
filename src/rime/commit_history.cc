@@ -33,6 +33,9 @@ void CommitHistory::Push(const Composition& composition, const string& input) {
   CommitRecord* last = NULL;
   size_t end = 0;
   for (const Segment& seg : composition) {
+    // 蓬萊：還沒選的聯想不算送出（同 Composition::GetCommitText）
+    if (seg.HasTag("prediction") && seg.status < Segment::kSelected)
+      continue;
     if (auto cand = seg.GetSelectedCandidate()) {
       if (last && last->type == cand->type()) {
         // join adjacent text of same type

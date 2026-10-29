@@ -121,6 +121,10 @@ string Composition::GetCommitText(const RawInputFormat* format) const {
   string result;
   size_t end = 0;
   for (const Segment& seg : *this) {
+    // 蓬萊：還沒選的聯想（librime-predict 的 prediction 段落）不是要送出的字：
+    // 不然 inline_candidate 開著時第一個聯想會顯示在文件裡，送出組字區也會把它送出去
+    if (seg.HasTag("prediction") && seg.status < Segment::kSelected)
+      continue;
     if (auto cand = seg.GetSelectedCandidate()) {
       end = cand->end();
       result += cand->text();

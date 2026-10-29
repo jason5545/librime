@@ -264,6 +264,9 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
       config->GetBool(name_space_ + "/digit_runs", &digit_runs_);
       config->GetInt(name_space_ + "/digit_min_length", &digit_min_length_);
       config->GetDouble(name_space_ + "/digit_penalty", &digit_penalty_);
+      // 數字串裡連著的聲調鍵（speller 收進來的，speller/digit_tones）
+      config->GetBool("speller/digit_tones", &digit_tones_);
+      config->GetString("speller/finals", &speller_finals_);
     }
     poet_.reset(new Poet(language(), config));
     // Jason 原型：學習紀錄排序公式、撤銷學習的時間窗
@@ -610,6 +613,17 @@ void ScriptTranslator::ForgetLast(Context* ctx) {
             << " entries removed.";
   ctx->set_property("forget_last",
                     (removed > 0 ? "forgotten\t" : "gone\t") + item.text);
+}
+
+bool ScriptTranslator::HasDigitTonePair(const string& input) const {
+  if (!digit_tones_)
+    return false;
+  for (size_t i = 1; i < input.length(); ++i) {
+    if (speller_finals_.find(input[i]) != string::npos &&
+        speller_finals_.find(input[i - 1]) != string::npos)
+      return true;
+  }
+  return false;
 }
 
 bool ScriptTranslator::EnglishCode(const string& word, Code* code) {
@@ -1314,6 +1328,8 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
     digits = is_digit(input_[i]);
   if (spans.empty() && !digits)
     return;
+  // 收了連著的聲調鍵（speller/digit_tones）：中文切不開整段，只有數字讀得完，直接排第一
+  const bool digit_tones = digits && translator_->HasDigitTonePair(input_);
 
   // 2. 切法：每一段自己一種；最長的 6 段裡互不重疊的兩段一種（一句最多兩段英文，
   //    跟離線模擬 tools/lm/ntc.py 相同）
@@ -1537,6 +1553,8 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
         local = judge->Score(replaced);
       m.margin = best ? local - penalty - best->score
                       : std::numeric_limits<double>::infinity();
+      if (is_digits && digit_tones)
+        m.margin = std::numeric_limits<double>::infinity();
       kept.push_back(m);
     }
     made.swap(kept);
@@ -1545,7 +1563,7 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
         readings[0].lower.find(word->text()) != string::npos)
       word.reset();
     const int guard = translator_->english_judge_learned();
-    promote = !(guard > 0 && learned >= guard);
+    promote = !(guard > 0 && learned >= guard) || digit_tones;
   }
 
   // 5. 照分數排（沒有判斷表時是整句權重），跟原本的整句、彼此重複的拿掉，

@@ -23,6 +23,8 @@ class AbcSegmentor : public Segmentor {
   string initials_;
   string finals_;
   set<string> extra_tags_;
+  // 蓬萊：整段數字鍵裡連著的聲調鍵也算進這一段（speller/digit_tones）
+  bool digit_tones_ = false;
 };
 
 }  // namespace rime

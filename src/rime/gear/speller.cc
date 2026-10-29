@@ -68,6 +68,47 @@ static bool expecting_an_initial(Context* ctx,
          !belongs_to(previous_char, alphabet);
 }
 
+// 蓬萊：整段數字鍵（speller/digit_tones）
+static inline bool is_digit(int ch) {
+  return ch >= '0' && ch <= '9';
+}
+
+static bool all_digits(const string& input) {
+  for (char c : input) {
+    if (!is_digit(c))
+      return false;
+  }
+  return !input.empty();
+}
+
+// 組字區只有一段、從頭開始，蓋到 end（跟 translator/digit_runs 一樣只看整段輸入）
+static Segment* whole_segment(Context* ctx, size_t end) {
+  Composition& comp = ctx->composition();
+  if (comp.empty() || comp.back().start != 0 || comp.back().end != end)
+    return nullptr;
+  return &comp.back();
+}
+
+// 選單裡有蓋住整段的數字候選（translator/digit_runs 給的，型別 digits）
+static bool has_whole_digit_candidate(Context* ctx, size_t end) {
+  Segment* seg = whole_segment(ctx, end);
+  if (!seg || !seg->menu)
+    return false;
+  // 沒排第一的數字在第 english_letter_position（6）個左右
+  const size_t kLookAhead = 20;
+  size_t n = seg->menu->Prepare(kLookAhead);
+  for (size_t i = 0; i < n; ++i) {
+    auto cand = seg->menu->GetCandidateAt(i);
+    if (!cand || cand->start() != 0 || cand->end() != end)
+      continue;
+    for (const auto& item : Candidate::GetGenuineCandidates(cand)) {
+      if (item->type() == "digits")
+        return true;
+    }
+  }
+  return false;
+}
+
 Speller::Speller(const Ticket& ticket)
     : Processor(ticket), alphabet_(kRimeAlphabet) {
   if (Config* config = engine_->schema()->config()) {
@@ -91,6 +132,9 @@ Speller::Speller(const Ticket& ticket)
       else if (auto_clear == "max_length")
         auto_clear_ = kClearMaxLength;
     }
+    // 蓬萊：整段都是數字鍵時，連著的聲調鍵也收（0912345678 的 4、7）。只在翻譯器出得了數字候選時收
+    // （translator/digit_runs，見 AcceptsDigitTone），不然收進來也只剩中文切不開的半句
+    config->GetBool("speller/digit_tones", &digit_tones_);
   }
   if (initials_.empty()) {
     initials_ = alphabet_;
@@ -109,8 +153,12 @@ ProcessResult Speller::ProcessKeyEvent(const KeyEvent& key_event) {
   if (!belongs_to(ch, alphabet_) && !belongs_to(ch, delimiters_))
     return kNoop;
   Context* ctx = engine_->context();
+  // 蓬萊：收過連著的聲調鍵的數字串不可能是中文，空白鍵不當一聲，交給後面確認選字（跟 ㄋㄧˇ＋空白一樣）
+  if (ch == XK_space && InDigitToneRun(ctx))
+    return kNoop;
   bool is_initial = belongs_to(ch, initials_);
-  if (!is_initial && expecting_an_initial(ctx, alphabet_, finals_)) {
+  if (!is_initial && expecting_an_initial(ctx, alphabet_, finals_) &&
+      !AcceptsDigitTone(ctx, ch)) {
     return kNoop;
   }
   // handles input beyond max_code_length when auto_select is false.
@@ -143,6 +191,34 @@ ProcessResult Speller::ProcessKeyEvent(const KeyEvent& key_event) {
     DLOG(INFO) << "auto-clear when no candidate.";
   }
   return kAccepted;
+}
+
+// 聲調鍵接在聲調鍵（或空白）後面、本來不收的時候：整段輸入都是數字鍵、組字區只有一段，
+// 而且選單裡有蓋住整段的數字候選，才收進輸入。組字區空的、聲調鍵開頭（caret 0）照舊不收；
+// 整段剛好是一個詞時翻譯器不出數字候選，照舊交給選字（打完 ㄞˋ 多按一次 ˋ 還是選第 4 個）
+bool Speller::AcceptsDigitTone(Context* ctx, int ch) {
+  if (!digit_tones_ || !is_digit(ch))
+    return false;
+  const string& input = ctx->input();
+  const size_t caret = ctx->caret_pos();
+  if (caret == 0 || caret != input.length() || !all_digits(input))
+    return false;
+  return has_whole_digit_candidate(ctx, caret);
+}
+
+// 整段輸入都是數字鍵、組字區只有一段，而且裡面有連著的聲調鍵（只有 AcceptsDigitTone 收得進來）
+bool Speller::InDigitToneRun(Context* ctx) {
+  if (!digit_tones_)
+    return false;
+  const string& input = ctx->input();
+  if (ctx->caret_pos() != input.length() || !all_digits(input) ||
+      !whole_segment(ctx, input.length()))
+    return false;
+  for (size_t i = 1; i < input.length(); ++i) {
+    if (belongs_to(input[i], finals_) && belongs_to(input[i - 1], finals_))
+      return true;
+  }
+  return false;
 }
 
 bool Speller::AutoSelectAtMaxCodeLength(Context* ctx) {

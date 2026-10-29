@@ -73,6 +73,12 @@ class ScriptTranslator : public Translator,
   int english_letter_trim() const { return english_letter_trim_; }
   double english_letter_penalty() const { return english_letter_penalty_; }
   int english_letter_position() const { return english_letter_position_; }
+  // 中文那邊比幾個讀法：原本的第一候選＋前 english_judge_readings 個整句，取判斷分數最高的
+  int english_judge_readings() const { return english_judge_readings_; }
+  // 整段都是數字鍵時也試數字（退回按鍵原本的字）：至少 digit_min_length 鍵，比照字母串多扣 digit_penalty
+  bool digit_runs() const { return digit_runs_; }
+  int digit_min_length() const { return digit_min_length_; }
+  double digit_penalty() const { return digit_penalty_; }
   // 英文字母的假音節（詞典裡「注音＋~」的音節，只能簡拼），拼成英文詞的碼；
   // 有字母找不到時回傳 false，code 不動（這個詞就不寫學習紀錄）
   bool EnglishCode(const string& word, Code* code);
@@ -125,6 +131,10 @@ class ScriptTranslator : public Translator,
   int english_letter_trim_ = 2;
   double english_letter_penalty_ = 4.0;
   int english_letter_position_ = 6;
+  int english_judge_readings_ = 5;
+  bool digit_runs_ = false;
+  int digit_min_length_ = 2;
+  double digit_penalty_ = 4.0;
   bool english_letters_ready_ = false;
   vector<int32_t> english_letters_;  // a–z 的假音節；-1 表示詞典裡沒有
   // preedit_format for input after the caret (set on the context)

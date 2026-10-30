@@ -18,6 +18,7 @@
 #include <rime/algo/syllabifier.h>
 #include <rime/algo/strings.h>
 #include <rime/dict/db.h>
+#include <rime/dict/level_db.h>
 #include <rime/dict/table.h>
 #include <rime/dict/user_dictionary.h>
 #include <rime/dict/vocabulary.h>
@@ -39,7 +40,10 @@ struct DfsState {
   size_t depth() const { return code.size(); }
 
   bool IsExactMatch(const string& prefix) {
-    return boost::starts_with(key, prefix + '\t');
+    // 蓬萊：同 starts_with(key, prefix + '\t')，不另外配置字串
+    return key.size() > prefix.size() &&
+           key.compare(0, prefix.size(), prefix) == 0 &&
+           key[prefix.size()] == '\t';
   }
   bool IsPrefixMatch(const string& prefix) {
     return boost::starts_with(key, prefix);
@@ -237,7 +241,8 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
       state->code.pop_back();
     }
     BOOST_SCOPE_EXIT_END
-    if (!TranslateCodeToString(state->code, &prefix))
+    // 蓬萊：等於 TranslateCodeToString(state->code, &prefix)，只是從上一層的前綴往後接
+    if (!AppendSyllableToPrefix(spelling.first, current_prefix, &prefix))
       continue;
     for (size_t i = 0; i < spelling.second.size(); ++i) {
       auto props = spelling.second[i];
@@ -332,7 +337,11 @@ an<UserDictEntryCollector> UserDictionary::Lookup(
   state.present_tick = tick_ + 1;
   state.credibility.push_back(initial_credibility);
   state.quality_len.push_back(0.0);
-  state.accessor = db_->Query("");
+  // 蓬萊：LevelDB 的學習紀錄改查記憶體副本（level_db.cc 的 LevelDbMirror），順序和內容跟 Query("") 相同
+  if (auto level_db = As<LevelDb>(db_))
+    state.accessor = level_db->QueryUserEntries();
+  else
+    state.accessor = db_->Query("");
   state.accessor->Jump(" ");  // skip metadata
   string prefix;
   DfsLookup(syll_graph, start_pos, prefix, &state);
@@ -529,6 +538,27 @@ bool UserDictionary::CommitPendingTransaction() {
     return db->CommitTransaction();
   }
   return false;
+}
+
+bool UserDictionary::AppendSyllableToPrefix(SyllableId syllable_id,
+                                            const string& base,
+                                            string* result) {
+  if (!table_ || !result)
+    return false;
+  auto found = rev_syllabary_.find(syllable_id);
+  const string& spelling =
+      found != rev_syllabary_.end()
+          ? found->second
+          : (rev_syllabary_[syllable_id] = table_->GetSyllableById(syllable_id));
+  if (spelling.empty()) {
+    LOG(ERROR) << "Error translating syllable_id '" << syllable_id << "'.";
+    result->clear();
+    return false;
+  }
+  result->assign(base);
+  result->append(spelling);
+  result->push_back(' ');
+  return true;
 }
 
 bool UserDictionary::TranslateCodeToString(const Code& code, string* result) {

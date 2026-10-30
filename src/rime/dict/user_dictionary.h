@@ -107,6 +107,9 @@ class UserDictionary : public Class<UserDictionary, const Ticket&> {
   bool Initialize();
   bool FetchTickCount();
   bool TranslateCodeToString(const Code& code, string* result);
+  bool AppendSyllableToPrefix(SyllableId syllable_id,
+                              const string& base,
+                              string* result);
   void DfsLookup(const SyllableGraph& syll_graph,
                  size_t current_pos,
                  const string& current_prefix,

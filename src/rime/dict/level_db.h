@@ -71,6 +71,9 @@ class LevelDb : public Db, public Recoverable, public Transactional {
   // 蓬萊：使用者詞條（key ≥ " "，不含 metadata）的記憶體副本，給 UserDictionary::Lookup 逐鍵查。
   // 跟 Query("") 走 LevelDB 的結果相同：只看得到已經寫進 LevelDB 的（交易中的寫入 commit 之後才看得到）
   an<DbAccessor> QueryUserEntries();
+  // 蓬萊：每次寫入、交易開始／結束、開關都換一個全域唯一的新值（UserDictionary::data_version）
+  size_t version() const { return version_; }
+  static size_t NewVersion();
 
  private:
   void Initialize();
@@ -80,6 +83,7 @@ class LevelDb : public Db, public Recoverable, public Transactional {
   the<LevelDbWrapper> db_;
   string db_type_;
   an<LevelDbMirror> mirror_;
+  size_t version_ = NewVersion();
   // 交易中的寫入（照順序；second 沒值＝刪掉），CommitTransaction 成功才套到副本
   vector<pair<string, std::optional<string>>> pending_;
 };

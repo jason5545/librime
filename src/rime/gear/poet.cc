@@ -255,16 +255,42 @@ an<Sentence> Poet::MakeSentence(const WordGraph& graph,
 // Make `max_sentences` sentences using beam search and dp on word graph.
 //
 // There is no strategy because it unconditionally use grammar.
+struct PoetStates {
+  map<int, std::list<Line>> states;
+};
+
+an<PoetStates> NewPoetStates() {
+  return New<PoetStates>();
+}
+
 deque<an<Sentence>> Poet::MakeSentences(const WordGraph& graph,
                                         size_t total_length,
                                         const string& preceding_text,
                                         size_t max_sentences,
                                         double cutoff_threshold) {
+  PoetStates states;
+  return MakeSentences(graph, total_length, preceding_text, max_sentences,
+                       cutoff_threshold, &states, -1);
+}
+
+deque<an<Sentence>> Poet::MakeSentences(const WordGraph& graph,
+                                        size_t total_length,
+                                        const string& preceding_text,
+                                        size_t max_sentences,
+                                        double cutoff_threshold,
+                                        PoetStates* poet_states,
+                                        int reuse_upto) {
   size_t beam_width =
       max_sentences * 3;  // allow more possibilities during search
-  using State = std::list<Line>;
-  map<int, State> states;
-  states[0].push_back(Line::kEmpty);
+  auto& states = poet_states->states;
+  if (reuse_upto < 0) {
+    states.clear();
+    states[0].push_back(Line::kEmpty);
+  } else {
+    // 蓬萊：位置 ≤ reuse_upto 的狀態只靠起點更前面的詞條算出來，沿用；後面的重算。每個位置的狀態
+    // 照起點由小到大收進來，跟從頭算的順序相同（同分時的排序也一樣）
+    states.erase(states.upper_bound(reuse_upto), states.end());
+  }
   for (const auto& sv : graph) {
     size_t start_pos = sv.first;
     if (states.find(start_pos) == states.end())
@@ -273,6 +299,8 @@ deque<an<Sentence>> Poet::MakeSentences(const WordGraph& graph,
     const auto& source_state = states[start_pos];
     for (const auto& ev : sv.second) {
       size_t end_pos = ev.first;
+      if (reuse_upto >= 0 && end_pos <= static_cast<size_t>(reuse_upto))
+        continue;
       if (start_pos == 0 && end_pos == total_length)
         continue;
       const DictEntryList& entries = ev.second;

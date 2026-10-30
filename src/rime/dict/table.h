@@ -204,9 +204,11 @@ class Table : public MappedFile {
   RIME_DLL string GetSyllableById(int syllable_id);
   RIME_DLL TableAccessor QueryWords(int syllable_id);
   RIME_DLL TableAccessor QueryPhrases(const Code& code);
+  // 蓬萊：watermark 不是 nullptr 時記下查詢讀過的最遠位置（音節圖的頂點），ScriptTranslator 跨按鍵沿用查詞結果用
   RIME_DLL bool Query(const SyllableGraph& syll_graph,
                       size_t start_pos,
-                      TableQueryResult* result);
+                      TableQueryResult* result,
+                      size_t* watermark = nullptr);
   RIME_DLL string GetEntryText(const table::Entry& entry);
 
   uint32_t dict_file_checksum() const;

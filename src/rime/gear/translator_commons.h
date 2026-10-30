@@ -200,6 +200,8 @@ class TranslatorOptions {
   // 蓬萊：隱藏詞清單有變就併進 blacklist（每次查詢前呼叫）；沒設 dictionary_exclude_file 時什麼都不做
   void RefreshBlacklist();
   ExcludedWords* excluded_words() const { return excluded_words_.get(); }
+  // 蓬萊：blacklist 換過幾次（隱藏詞清單重新載入就變）
+  int blacklist_version() const { return excluded_version_; }
   int dictionary_exclude_min_length() const {
     return dictionary_exclude_min_length_;
   }

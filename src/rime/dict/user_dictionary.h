@@ -75,7 +75,8 @@ class UserDictionary : public Class<UserDictionary, const Ticket&> {
                                     size_t start_pos,
                                     size_t depth_limit = 0,
                                     size_t predict_word_from_depth = 0,
-                                    double initial_credibility = 0.0);
+                                    double initial_credibility = 0.0,
+                                    size_t* watermark = nullptr);  // 蓬萊：讀過的最遠位置
   size_t LookupWords(UserDictEntryIterator* result,
                      const string& input,
                      bool predictive,
@@ -95,6 +96,9 @@ class UserDictionary : public Class<UserDictionary, const Ticket&> {
 
   const string& name() const { return name_; }
   TickCount tick() const { return tick_; }
+  // 蓬萊：學習紀錄的版本（LevelDB 每次寫入、交易、開關都換一個新值；不是 LevelDB 時每次都不同）。
+  // ScriptTranslator 跨按鍵沿用查詞結果時，版本變了就不沿用
+  size_t data_version() const;
 
   static an<DictEntry> CreateDictEntry(const string& key,
                                        const string& value,

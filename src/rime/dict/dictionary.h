@@ -76,7 +76,8 @@ class Dictionary : public Class<Dictionary, const Ticket&> {
       size_t start_pos,
       const hash_set<string>* blacklist = nullptr,
       bool predict_word = false,
-      double initial_credibility = 0.0);
+      double initial_credibility = 0.0,
+      size_t* watermark = nullptr);  // 蓬萊：讀過的最遠位置（Table::Query）
   // if predictive is true, do an expand search with limit,
   // otherwise do an exact match.
   // return num of matching keys.

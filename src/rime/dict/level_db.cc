@@ -6,6 +6,7 @@
 //
 
 #include <algorithm>
+#include <atomic>
 #include <leveldb/db.h>
 #include <leveldb/write_batch.h>
 #include <rime/common.h>
@@ -257,6 +258,7 @@ bool LevelDb::Update(const string& key, const string& value) {
     return false;
   DLOG(INFO) << "update db entry: " << key << " => " << value;
   bool ok = db_->Update(key, value, in_transaction());
+  version_ = NewVersion();
   if (!ok)
     MirrorReset();  // 不確定寫了沒，下次查詢從 LevelDB 重建
   else if (in_transaction())
@@ -271,6 +273,7 @@ bool LevelDb::Erase(const string& key) {
     return false;
   DLOG(INFO) << "erase db entry: " << key;
   bool ok = db_->Erase(key, in_transaction());
+  version_ = NewVersion();
   if (!ok)
     MirrorReset();
   else if (in_transaction())
@@ -278,6 +281,11 @@ bool LevelDb::Erase(const string& key) {
   else
     MirrorApply(key, nullptr);
   return ok;
+}
+
+size_t LevelDb::NewVersion() {
+  static std::atomic<size_t> last{0};
+  return ++last;
 }
 
 an<DbAccessor> LevelDb::QueryUserEntries() {
@@ -338,6 +346,7 @@ bool LevelDb::Restore(const path& snapshot_file) {
   // TODO(chen): suppose we only use this method for user dbs.
   bool success = UserDbHelper(this).UniformRestore(snapshot_file);
   MirrorReset();
+  version_ = NewVersion();
   if (!success) {
     LOG(ERROR) << "failed to restore db '" << name() << "' from '"
                << snapshot_file << "'.";
@@ -374,6 +383,7 @@ bool LevelDb::Open() {
     return false;
   MirrorReset();
   pending_.clear();
+  version_ = NewVersion();
   Initialize();
   readonly_ = false;
   auto status = db_->Open(file_path(), readonly_);
@@ -398,6 +408,7 @@ bool LevelDb::OpenReadOnly() {
     return false;
   MirrorReset();
   pending_.clear();
+  version_ = NewVersion();
   Initialize();
   readonly_ = true;
   auto status = db_->Open(file_path(), readonly_);
@@ -416,6 +427,7 @@ bool LevelDb::Close() {
   db_->Release();
   MirrorReset();
   pending_.clear();
+  version_ = NewVersion();
 
   LOG(INFO) << "closed db '" << name() << "'.";
   loaded_ = false;
@@ -441,6 +453,7 @@ bool LevelDb::BeginTransaction() {
     return false;
   db_->ClearBatch();
   pending_.clear();
+  version_ = NewVersion();
   in_transaction_ = true;
   return true;
 }
@@ -450,6 +463,7 @@ bool LevelDb::AbortTransaction() {
     return false;
   db_->ClearBatch();
   pending_.clear();
+  version_ = NewVersion();
   in_transaction_ = false;
   return true;
 }
@@ -459,6 +473,7 @@ bool LevelDb::CommitTransaction() {
     return false;
   bool ok = db_->CommitBatch();
   db_->ClearBatch();
+  version_ = NewVersion();
   in_transaction_ = false;
   if (ok) {
     for (const auto& op : pending_)

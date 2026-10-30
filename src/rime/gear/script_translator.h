@@ -25,6 +25,7 @@ class EnglishJudge;
 class EnglishLexicon;
 class Poet;
 struct RawInputFormat;
+struct SentenceCache;
 class UserDictionary;
 struct SyllableGraph;
 
@@ -58,6 +59,9 @@ class ScriptTranslator : public Translator,
   int max_word_length() const { return max_word_length_; }
   int core_word_length() const;
   int max_user_phrase_syllables() const { return max_user_phrase_syllables_; }
+  // 蓬萊：跨按鍵沿用的整句材料（script_translator.cc 的 SentenceCache）。帶上這次查詞用的詞典、學習紀錄，
+  // 跟上次不同（讀音變體、隱藏詞清單、學習紀錄寫入）就整個清掉
+  SentenceCache* sentence_cache(Dictionary* dict, UserDictionary* user_dict);
   // 蓬萊：英文單字進整句
   const an<EnglishLexicon>& english_lexicon() const { return english_lexicon_; }
   int english_min_length() const { return english_min_length_; }
@@ -189,6 +193,7 @@ class ScriptTranslator : public Translator,
   vector<int32_t> english_letters_;  // a–z 的假音節；-1 表示詞典裡沒有
   // preedit_format for input after the caret (set on the context)
   an<RawInputFormat> raw_input_format_;
+  the<SentenceCache> sentence_cache_;
   the<Corrector> corrector_;
   the<Poet> poet_;
   vector<an<Phrase>> queue_;

@@ -570,7 +570,8 @@ const double kPenaltyForAmbiguousSyllable = -2.995732274;
 
 bool Table::Query(const SyllableGraph& syll_graph,
                   size_t start_pos,
-                  TableQueryResult* result) {
+                  TableQueryResult* result,
+                  size_t* watermark) {
   if (!result || !index_ || start_pos >= syll_graph.interpreted_length)
     return false;
   result->clear();
@@ -581,6 +582,8 @@ bool Table::Query(const SyllableGraph& syll_graph,
     size_t current_pos = q.front().first;
     TableQuery query(q.front().second);
     q.pop();
+    if (watermark && current_pos > *watermark)
+      *watermark = current_pos;
     auto index = syll_graph.indices.find(current_pos);
     if (index == syll_graph.indices.end()) {
       continue;
@@ -596,6 +599,8 @@ bool Table::Query(const SyllableGraph& syll_graph,
       SyllableId syll_id = spellings.first;
       for (auto props : spellings.second) {
         size_t end_pos = props->end_pos;
+        if (watermark && end_pos > *watermark)
+          *watermark = end_pos;
 
         double penalty = 0.0;
         if (false) {

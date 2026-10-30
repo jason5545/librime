@@ -23,6 +23,10 @@ class Grammar;
 class Language;
 struct Line;
 
+// 蓬萊：MakeSentences 的 beam 狀態（每個位置的候選句），留著給下一個鍵沿用
+struct PoetStates;
+an<PoetStates> NewPoetStates();
+
 class Poet {
  public:
   // Line "less", used to compare composed line of the same input range.
@@ -44,6 +48,16 @@ class Poet {
                                     const string& preceding_text,
                                     size_t count,
                                     double cutoff_threshold);
+  // 蓬萊：同上，beam 狀態放在 states。reuse_upto ≥ 0 時，位置 ≤ reuse_upto 的狀態沿用 states 裡的
+  // （呼叫的人保證：上一次用同一份前文、同一個 count 算出來，起點 < reuse_upto 的詞條跟這次是同一批物件，
+  // reuse_upto 也不是上次和這次的結尾），只算終點在它後面的；< 0 時從頭算。結果跟從頭算逐位元組相同
+  deque<an<Sentence>> MakeSentences(const WordGraph& graph,
+                                    size_t total_length,
+                                    const string& preceding_text,
+                                    size_t count,
+                                    double cutoff_threshold,
+                                    PoetStates* states,
+                                    int reuse_upto);
 
   template <class TranslatorT>
   an<Translation> ContextualWeighted(an<Translation> translation,

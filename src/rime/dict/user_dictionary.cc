@@ -26,6 +26,7 @@
 namespace rime {
 
 struct DfsState {
+  size_t watermark = 0;  // 蓬萊：讀過的最遠位置
   size_t depth_limit;
   size_t predict_word_from_depth;
   TickCount present_tick;
@@ -226,6 +227,8 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
                                size_t current_pos,
                                const string& current_prefix,
                                DfsState* state) {
+  if (current_pos > state->watermark)
+    state->watermark = current_pos;
   auto index = syll_graph.indices.find(current_pos);
   if (index == syll_graph.indices.end()) {
     return;
@@ -251,6 +254,8 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
       state->credibility.push_back(state->credibility.back() +
                                    props->credibility);
       size_t end_pos = props->end_pos;
+      if (end_pos > state->watermark)
+        state->watermark = end_pos;
       // 全碼匹配長度積分
       bool is_normal_spelling = props->type == kNormalSpelling;
       double delta_quality_len =
@@ -326,11 +331,15 @@ an<UserDictEntryCollector> UserDictionary::Lookup(
     size_t start_pos,
     size_t depth_limit,
     size_t predict_word_from_depth,
-    double initial_credibility) {
+    double initial_credibility,
+    size_t* watermark) {
+  if (watermark && start_pos > *watermark)
+    *watermark = start_pos;
   if (!table_ || !prism_ || !loaded() ||
       start_pos >= syll_graph.interpreted_length)
     return nullptr;
   DfsState state;
+  state.watermark = start_pos;
   state.depth_limit = depth_limit;
   state.predict_word_from_depth = predict_word_from_depth;
   FetchTickCount();
@@ -345,6 +354,8 @@ an<UserDictEntryCollector> UserDictionary::Lookup(
   state.accessor->Jump(" ");  // skip metadata
   string prefix;
   DfsLookup(syll_graph, start_pos, prefix, &state);
+  if (watermark && state.watermark > *watermark)
+    *watermark = state.watermark;
   if (state.query_result.empty())
     return nullptr;
   // sort each group of homophones by weight
@@ -538,6 +549,12 @@ bool UserDictionary::CommitPendingTransaction() {
     return db->CommitTransaction();
   }
   return false;
+}
+
+size_t UserDictionary::data_version() const {
+  if (auto level_db = As<LevelDb>(db_))
+    return level_db->version();
+  return LevelDb::NewVersion();
 }
 
 bool UserDictionary::AppendSyllableToPrefix(SyllableId syllable_id,

@@ -312,10 +312,131 @@ class KeylidTranslation : public Translation {
   deque<an<Candidate>> queue_;
 };
 
+// 蓬萊：跨按鍵沿用的整句材料。
+// 每個鍵 ScriptTranslation 都從頭切音節、對音節圖的每個起點查一次學習紀錄和詞典、Poet 從頭造句，
+// 延遲跟已經打的鍵數成正比（10/30 量：第 1 鍵 0.07 ms，第 21–30 鍵 1.3 ms）。這裡留著上一次的音節圖、
+// 每個起點查到的詞（WordGraph 的一列）和查詢讀過的最遠位置（水位）、Poet 每個位置的 beam 狀態、
+// 英文段自己切音節查到的詞。新的一鍵先找出新舊音節圖第一個不同的位置 D（從那個位置出去的邊不同，
+// 或到了任一邊的結尾）：水位 < D 的起點，查詢讀過的邊和結尾的比較都沒變，結果一定相同，直接沿用；
+// 其他重查。Poet 沿用第一個重查的起點以前的狀態（Poet::MakeSentences 的 reuse_upto）。
+// 詞典、讀音變體、隱藏詞清單、學習紀錄（任何寫入、交易）變了就整個清掉。沿用的詞條是同一批物件：
+// WordGraph 的詞條只有 Poet 讀，整句是複製詞條內容，不會改到它們
+struct SentenceCache {
+  struct Key {
+    const Dictionary* dict = nullptr;
+    const UserDictionary* user_dict = nullptr;
+    string variant;
+    int blacklist_version = 0;
+    size_t user_version = 0;
+    bool operator==(const Key& o) const {
+      return dict == o.dict && user_dict == o.user_dict &&
+             variant == o.variant && blacklist_version == o.blacklist_version &&
+             user_version == o.user_version;
+    }
+  };
+  struct Row {
+    an<map<int, DictEntryList>> entries;
+    size_t watermark = 0;
+  };
+  // 英文段：起點、終點、那段輸入、是不是最後一段（EnrollSegment）
+  using SegmentKey = std::tuple<size_t, size_t, string, bool>;
+
+  // 一次 PrepareForMakingSentence 的結果。全碼打字時，每按一個聲調鍵整段都是正常拼法，Syllabifier
+  // 會把整張圖的簡拼刪掉，下一鍵又回來：相鄰兩鍵的圖從頭就不同，所以留最近幾次的，各自比
+  struct Snapshot {
+    an<ScriptSyllabifier> syllabifier;  // rows 用的音節圖
+    map<int, Row> rows;
+    an<PoetStates> poet;  // 用這份 rows 算的 beam 狀態（被後來的拿走、或沒算時是空的）
+    string poet_context;
+    int poet_count = 0;
+    size_t poet_total = 0;
+  };
+  static constexpr size_t kMaxSnapshots = 4;
+
+  Key key;
+  deque<Snapshot> snapshots;  // 最近的在前面
+  // 這次 PrepareForMakingSentence 算給 MakeSentences 的：拿來接著算的 beam 狀態和能沿用到哪
+  an<PoetStates> poet_source;
+  int poet_reuse = -1;
+  string poet_context;
+  int poet_count = 0;
+  size_t poet_total = 0;
+  map<SegmentKey, an<WordGraph>> segments, last_segments;
+
+  void Reset(const Key& k) {
+    key = k;
+    snapshots.clear();
+    poet_source.reset();
+    poet_reuse = -1;
+    segments.clear();
+    last_segments.clear();
+  }
+
+  bool FindSegment(const SegmentKey& k, an<WordGraph>* part) {
+    auto found = segments.find(k);
+    if (found == segments.end()) {
+      found = last_segments.find(k);
+      if (found == last_segments.end())
+        return false;
+      segments[k] = found->second;
+    }
+    *part = found->second;
+    return true;
+  }
+};
+
+namespace {
+
+bool same_edge(const EdgeProperties& a, const EdgeProperties& b) {
+  return a.type == b.type && a.end_pos == b.end_pos &&
+         a.credibility == b.credibility && a.tips == b.tips &&
+         a.is_correction == b.is_correction &&
+         a.ambiguous_source_positions == b.ambiguous_source_positions;
+}
+
+bool same_edges(const EndVertexMap& a, const EndVertexMap& b) {
+  if (a.size() != b.size())
+    return false;
+  for (auto i = a.begin(), j = b.begin(); i != a.end(); ++i, ++j) {
+    if (i->first != j->first || i->second.size() != j->second.size())
+      return false;
+    for (auto k = i->second.begin(), l = j->second.begin();
+         k != i->second.end(); ++k, ++l) {
+      if (k->first != l->first || !same_edge(k->second, l->second))
+        return false;
+    }
+  }
+  return true;
+}
+
+// 新舊音節圖第一個不同的位置：從那個位置出去的邊不同，或到了任一邊的結尾（interpreted_length）。
+// 查詞只讀 indices（edges 轉置來的）和 interpreted_length，位置都 < D 時兩邊讀到的一樣
+size_t first_difference(const SyllableGraph& a, const SyllableGraph& b) {
+  const size_t limit = (std::min)(a.interpreted_length, b.interpreted_length);
+  auto i = a.edges.begin();
+  auto j = b.edges.begin();
+  for (; i != a.edges.end() && j != b.edges.end(); ++i, ++j) {
+    if (i->first != j->first)
+      return (std::min)({limit, i->first, j->first});
+    if (i->first >= limit)
+      return limit;
+    if (!same_edges(i->second, j->second))
+      return i->first;
+  }
+  if (i != a.edges.end())
+    return (std::min)(limit, i->first);
+  if (j != b.edges.end())
+    return (std::min)(limit, j->first);
+  return limit;
+}
+
+}  // namespace
+
 // ScriptTranslator implementation
 
 ScriptTranslator::ScriptTranslator(const Ticket& ticket)
     : Translator(ticket), Memory(ticket), TranslatorOptions(ticket) {
+  sentence_cache_.reset(new SentenceCache);
   if (!engine_)
     return;
   if (Config* config = engine_->schema()->config()) {
@@ -576,6 +697,19 @@ an<Translation> ScriptTranslator::Query(const string& input,
   if (forget)
     return forget + deduped;
   return deduped;
+}
+
+SentenceCache* ScriptTranslator::sentence_cache(Dictionary* dict,
+                                               UserDictionary* user_dict) {
+  SentenceCache::Key key;
+  key.dict = dict;
+  key.user_dict = user_dict;
+  key.variant = dict ? dict->variant() : string();
+  key.blacklist_version = blacklist_version();
+  key.user_version = user_dict ? user_dict->data_version() : 0;
+  if (!(key == sentence_cache_->key))
+    sentence_cache_->Reset(key);
+  return sentence_cache_.get();
 }
 
 void ScriptTranslator::SelectDictionaryVariant() {
@@ -1286,18 +1420,89 @@ WordGraph ScriptTranslation::PrepareForMakingSentence(
   const int kMaxSyllablesForUserPhraseQuery =
       translator_->max_user_phrase_syllables();
   const auto& syllable_graph = syllabifier_->syllable_graph();
+  // 蓬萊：水位比新舊音節圖第一個不同的位置小的起點沿用上一鍵查到的（SentenceCache）
+  SentenceCache* cache = translator_->sentence_cache(dict, user_dict);
+  vector<size_t> diverge;
+  for (const auto& snapshot : cache->snapshots) {
+    diverge.push_back(first_difference(
+        snapshot.syllabifier->syllable_graph(), syllable_graph));
+  }
+  map<int, SentenceCache::Row> rows;
   WordGraph graph;
   for (const auto& x : syllable_graph.edges) {
     auto& same_start_pos = graph[x.first];
+    const SentenceCache::Row* reusable = nullptr;
+    for (size_t i = 0; i < cache->snapshots.size() && !reusable; ++i) {
+      const auto& old_rows = cache->snapshots[i].rows;
+      auto found = old_rows.find(x.first);
+      if (found != old_rows.end() && found->second.watermark < diverge[i])
+        reusable = &found->second;
+    }
+    if (reusable) {
+      same_start_pos = *reusable->entries;
+      rows[x.first] = *reusable;
+      continue;
+    }
+    size_t watermark = x.first;
     if (user_dict) {
       EnrollEntries(same_start_pos,
                     user_dict->Lookup(syllable_graph, x.first,
-                                      kMaxSyllablesForUserPhraseQuery));
+                                      kMaxSyllablesForUserPhraseQuery, 0, 0.0,
+                                      &watermark));
     }
     // merge lookup results
-    EnrollEntries(same_start_pos, dict->Lookup(syllable_graph, x.first,
-                                               &translator_->blacklist()));
+    EnrollEntries(same_start_pos,
+                  dict->Lookup(syllable_graph, x.first,
+                               &translator_->blacklist(), false, 0.0,
+                               &watermark));
+    rows[x.first] = {New<map<int, DictEntryList>>(same_start_pos), watermark};
   }
+  // Poet：在還留著 beam 狀態的快照裡，挑第一個詞條不同的起點最後面的那份；狀態沿用到那個起點
+  // （同一批詞條＝同一個物件。終點的條件在 MakeSentences 裡再加）
+  cache->poet_source.reset();
+  cache->poet_reuse = -1;
+  int best = 0;  // 沿用不到任何位置的不拿（拿走了那份快照就沒有 beam 狀態了）
+  for (auto& snapshot : cache->snapshots) {
+    if (!snapshot.poet)
+      continue;
+    int first_changed = (std::numeric_limits<int>::max)();
+    for (const auto& r : rows) {
+      auto found = snapshot.rows.find(r.first);
+      if (found == snapshot.rows.end() ||
+          found->second.entries != r.second.entries) {
+        first_changed = r.first;
+        break;
+      }
+    }
+    for (const auto& r : snapshot.rows) {
+      if (r.first >= first_changed)
+        break;
+      if (!rows.count(r.first)) {
+        first_changed = r.first;
+        break;
+      }
+    }
+    if (first_changed > best) {
+      best = first_changed;
+      cache->poet_source = snapshot.poet;
+      cache->poet_reuse = first_changed;
+      cache->poet_context = snapshot.poet_context;
+      cache->poet_count = snapshot.poet_count;
+      cache->poet_total = snapshot.poet_total;
+    }
+  }
+  if (cache->poet_source) {  // 拿走：接著算會改到它，原本那份快照不能再拿來沿用 beam 狀態
+    for (auto& snapshot : cache->snapshots) {
+      if (snapshot.poet == cache->poet_source)
+        snapshot.poet.reset();
+    }
+  }
+  SentenceCache::Snapshot snapshot;
+  snapshot.syllabifier = syllabifier_;
+  snapshot.rows = std::move(rows);
+  cache->snapshots.push_front(std::move(snapshot));
+  if (cache->snapshots.size() > SentenceCache::kMaxSnapshots)
+    cache->snapshots.pop_back();
   return graph;
 }
 
@@ -1306,10 +1511,32 @@ deque<an<Sentence>> ScriptTranslation::MakeSentences(
     UserDictionary* user_dict) {
   const auto& syllable_graph = syllabifier_->syllable_graph();
   WordGraph graph = PrepareForMakingSentence(dict, user_dict);
-  auto sentences =
-      poet_->MakeSentences(graph, syllable_graph.interpreted_length,
-                           translator_->GetPrecedingText(start_),
-                           max_sentences_, sentence_cutoff_threshold_);
+  // 蓬萊：Poet 沿用上一鍵的 beam 狀態到第一個換過的起點，也不能是上一次或這一次的結尾
+  SentenceCache* cache = translator_->sentence_cache(dict, user_dict);
+  const string preceding_text = translator_->GetPrecedingText(start_);
+  const size_t total_length = syllable_graph.interpreted_length;
+  an<PoetStates> states = cache->poet_source;
+  int reuse = -1;
+  if (states && preceding_text == cache->poet_context &&
+      max_sentences_ == cache->poet_count) {
+    reuse = (std::min)({cache->poet_reuse,
+                        static_cast<int>(cache->poet_total) - 1,
+                        static_cast<int>(total_length) - 1});
+  }
+  if (!states)
+    states = NewPoetStates();
+  cache->poet_source.reset();
+  auto sentences = poet_->MakeSentences(
+      graph, total_length, preceding_text, max_sentences_,
+      sentence_cutoff_threshold_, states.get(), reuse);
+  // 這次的快照（PrepareForMakingSentence 剛放在最前面）記下 beam 狀態，給後面的鍵沿用
+  if (!cache->snapshots.empty()) {
+    auto& snapshot = cache->snapshots.front();
+    snapshot.poet = states;
+    snapshot.poet_context = preceding_text;
+    snapshot.poet_count = max_sentences_;
+    snapshot.poet_total = total_length;
+  }
   for (auto& sentence : sentences) {
     sentence->Offset(start_);
     sentence->set_syllabifier(syllabifier_);
@@ -1499,34 +1726,44 @@ bool ScriptTranslation::EnrollSegment(
     // 這一段自己切音節、查詞：整段輸入的切法只要有一條全是正常拼法的路，
     // 就會刪掉簡拼（algo/syllabifier.cc），英文前後的那段可能因此切不出來
     bool is_rear = seg_end == input_.length();
-    Syllabifier syllabifier(translator_->delimiters(),
-                            is_rear && translator_->enable_completion(),
-                            translator_->strict_spelling());
-    if (corrector_)
-      syllabifier.EnableCorrection(corrector_);
-    SyllableGraph syllable_graph;
-    string seg = input_.substr(seg_start, seg_end - seg_start);
-    size_t consumed =
-        syllabifier.BuildSyllableGraph(seg, *dict->prism(), &syllable_graph);
-    // 整段都要切得開（英文後面緊接聲調鍵時，後段第一鍵就切不開）
-    if (consumed == seg.length()) {
-      part = New<WordGraph>();
-      for (const auto& x : syllable_graph.edges) {
-        map<int, DictEntryList> by_end_pos;
-        if (user_dict) {
-          EnrollEntries(by_end_pos, user_dict->Lookup(
-                                        syllable_graph, x.first,
-                                        translator_->max_user_phrase_syllables()));
-        }
-        EnrollEntries(by_end_pos, dict->Lookup(syllable_graph, x.first,
-                                               &translator_->blacklist()));
-        auto& same_start_pos = (*part)[seg_start + x.first];
-        for (auto& y : by_end_pos) {
-          same_start_pos[seg_start + y.first] = std::move(y.second);
+    // 蓬萊：同一段輸入（起點、終點、內容、是不是最後一段）切出來、查到的一樣，沿用上一鍵的（SentenceCache）
+    SentenceCache* sc = translator_->sentence_cache(dict, user_dict);
+    SentenceCache::SegmentKey skey{
+        seg_start, seg_end, input_.substr(seg_start, seg_end - seg_start),
+        is_rear};
+    if (sc->FindSegment(skey, &part)) {
+      (*cache)[key] = part;
+    } else {
+      Syllabifier syllabifier(translator_->delimiters(),
+                              is_rear && translator_->enable_completion(),
+                              translator_->strict_spelling());
+      if (corrector_)
+        syllabifier.EnableCorrection(corrector_);
+      SyllableGraph syllable_graph;
+      string seg = input_.substr(seg_start, seg_end - seg_start);
+      size_t consumed =
+          syllabifier.BuildSyllableGraph(seg, *dict->prism(), &syllable_graph);
+      // 整段都要切得開（英文後面緊接聲調鍵時，後段第一鍵就切不開）
+      if (consumed == seg.length()) {
+        part = New<WordGraph>();
+        for (const auto& x : syllable_graph.edges) {
+          map<int, DictEntryList> by_end_pos;
+          if (user_dict) {
+            EnrollEntries(by_end_pos, user_dict->Lookup(
+                                          syllable_graph, x.first,
+                                          translator_->max_user_phrase_syllables()));
+          }
+          EnrollEntries(by_end_pos, dict->Lookup(syllable_graph, x.first,
+                                                 &translator_->blacklist()));
+          auto& same_start_pos = (*part)[seg_start + x.first];
+          for (auto& y : by_end_pos) {
+            same_start_pos[seg_start + y.first] = std::move(y.second);
+          }
         }
       }
+      (*cache)[key] = part;
+      sc->segments[skey] = part;
     }
-    (*cache)[key] = part;
   }
   if (!part)
     return false;
@@ -1542,6 +1779,12 @@ bool ScriptTranslation::EnrollSegment(
 
 void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
                                               UserDictionary* user_dict) {
+  // 蓬萊：英文段沿用上一鍵切好、查好的（EnrollSegment）；這一鍵沒用到的，下一鍵就丟掉
+  {
+    SentenceCache* sc = translator_->sentence_cache(dict, user_dict);
+    sc->last_segments = std::move(sc->segments);
+    sc->segments.clear();
+  }
   const auto& lexicon = translator_->english_lexicon();
   const auto& judge = translator_->english_judge();
   const size_t n = input_.length();

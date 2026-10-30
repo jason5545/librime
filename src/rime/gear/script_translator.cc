@@ -358,6 +358,8 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
       // 單字表以外的連續字母串（頭尾各少 0–english_letter_trim 個字母）也當英文，只在有判斷表時
       config->GetBool(name_space_ + "/english_letter_runs",
                       &english_letter_runs_);
+      // 英文後面緊接空白：空白在注音裡是一聲，原本英文那段後面只剩一個一聲、組不成句；打開時空白跟著英文
+      config->GetBool(name_space_ + "/english_space", &english_space_);
       config->GetInt(name_space_ + "/english_letter_trim",
                      &english_letter_trim_);
       config->GetDouble(name_space_ + "/english_letter_penalty",
@@ -685,6 +687,15 @@ string ScriptTranslator::GetPrecedingText(size_t start) const {
 }
 
 bool ScriptTranslator::UpdateElements(const CommitEntry& commit_entry) {
+  // 蓬萊：帶著空白的英文（english_space）整句都不學，句子裡其他有碼的詞也不寫
+  // （tailscale 空白組成 Tail＋scale 時，Tail 不該寫進學習紀錄）。Memorize、
+  // 超過 max_word_length 的 SaveCommitEntry 都經過這裡；整句本身 Memorize 看到沒有碼的詞就不寫
+  if (english_space_) {
+    for (const DictEntry* e : commit_entry.elements) {
+      if (e && e->code.empty() && !e->text.empty() && e->text.back() == ' ')
+        return true;
+    }
+  }
   bool update_elements = false;
   // avoid updating single character entries within a phrase which is
   // composed with single characters only
@@ -1566,6 +1577,13 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
         }
       }
     }
+    // 字母串後面緊接空白：結尾在這裡的英文段把空白也算進去（只剩一個空白的那段本來就組不成）
+    if (translator_->english_space() && run_end < n && input_[run_end] == ' ') {
+      for (auto& s : spans) {
+        if (s.end == run_end)
+          s.end = run_end + 1;
+      }
+    }
     i = run_end;
   }
   // 1b. 整段都是數字鍵（大千的 0–9 是注音：1ㄅ 2ㄉ 3ˇ 4ˋ 5ㄓ 6ˊ 7˙ 8ㄚ 9ㄞ 0ㄢ）：數字也算一段，通不通交給判斷
@@ -1666,7 +1684,8 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
       bool english = false;
       for (const auto& s : config)
         english = english || (s.start == p && s.end == p + len);
-      if (k > 0)
+      // 帶著空白的英文（english_space）：那個空白就是分隔
+      if (k > 0 && !(translator_->english_space() && preedit.back() == ' '))
         preedit += separator;
       preedit += english ? input_.substr(p, len)
                          : translator_->FormatPreedit(input_.substr(p, len));

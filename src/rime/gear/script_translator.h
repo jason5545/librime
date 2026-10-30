@@ -71,6 +71,7 @@ class ScriptTranslator : public Translator,
   double english_judge_tau() const { return english_judge_tau_; }
   int english_judge_learned() const { return english_judge_learned_; }
   bool english_letter_runs() const { return english_letter_runs_; }
+  bool english_space() const { return english_space_; }
   int english_letter_trim() const { return english_letter_trim_; }
   double english_letter_penalty() const { return english_letter_penalty_; }
   int english_letter_position() const { return english_letter_position_; }
@@ -149,6 +150,8 @@ class ScriptTranslator : public Translator,
   double english_judge_tau_ = 4.0;
   int english_judge_learned_ = 4;
   bool english_letter_runs_ = false;
+  // 英文後面緊接的空白（一聲）算進英文那段，送出時留著空白
+  bool english_space_ = false;
   int english_letter_trim_ = 2;
   double english_letter_penalty_ = 4.0;
   int english_letter_position_ = 6;

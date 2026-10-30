@@ -72,6 +72,17 @@ class ScriptTranslator : public Translator,
   int english_judge_learned() const { return english_judge_learned_; }
   bool english_letter_runs() const { return english_letter_runs_; }
   bool english_space() const { return english_space_; }
+  // 後面緊接空白的單字表詞最短幾個字母（沒設時跟 english_min_length 一樣）
+  int english_space_min_length() const {
+    return english_space_min_length_ > 0 ? english_space_min_length_
+                                         : english_min_length_;
+  }
+  // 單字表照這個長度載入：english_space 打開時取兩者較短的
+  int english_lexicon_min_length() const {
+    return english_space_ ? (std::min)(english_min_length_,
+                                       english_space_min_length())
+                          : english_min_length_;
+  }
   int english_letter_trim() const { return english_letter_trim_; }
   double english_letter_penalty() const { return english_letter_penalty_; }
   int english_letter_position() const { return english_letter_position_; }
@@ -152,6 +163,7 @@ class ScriptTranslator : public Translator,
   bool english_letter_runs_ = false;
   // 英文後面緊接的空白（一聲）算進英文那段，送出時留著空白
   bool english_space_ = false;
+  int english_space_min_length_ = 0;
   int english_letter_trim_ = 2;
   double english_letter_penalty_ = 4.0;
   int english_letter_position_ = 6;

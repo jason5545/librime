@@ -343,8 +343,14 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
       config->GetInt(name_space_ + "/english_max_sentences",
                      &english_max_sentences_);
       config->GetDouble(name_space_ + "/english_weight", &english_weight_);
+      // 英文後面緊接空白：空白在注音裡是一聲，原本英文那段後面只剩一個一聲、組不成句；打開時空白跟著英文
+      config->GetBool(name_space_ + "/english_space", &english_space_);
+      // 後面緊接空白的單字表詞最短幾個字母（AI、PR）；沒設（0）跟 english_min_length 一樣。單字表照兩者較短的載入，
+      // 其他地方查單字表時另外擋 english_min_length
+      config->GetInt(name_space_ + "/english_space_min_length",
+                     &english_space_min_length_);
       english_lexicon_ = EnglishLexicon::Require(
-          english_lexicon, english_min_length_, english_min_zipf_);
+          english_lexicon, english_lexicon_min_length(), english_min_zipf_);
       // 中英混輸的判斷：判斷表（tools/gen_judge.py）、τ、第一候選有學過幾字以上的詞就不換
       string english_judge;
       if (english_lexicon_ &&
@@ -358,8 +364,6 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
       // 單字表以外的連續字母串（頭尾各少 0–english_letter_trim 個字母）也當英文，只在有判斷表時
       config->GetBool(name_space_ + "/english_letter_runs",
                       &english_letter_runs_);
-      // 英文後面緊接空白：空白在注音裡是一聲，原本英文那段後面只剩一個一聲、組不成句；打開時空白跟著英文
-      config->GetBool(name_space_ + "/english_space", &english_space_);
       config->GetInt(name_space_ + "/english_letter_trim",
                      &english_letter_trim_);
       config->GetDouble(name_space_ + "/english_letter_penalty",
@@ -1338,6 +1342,7 @@ struct EnglishSpan {
   size_t length() const { return end - start; }
   bool in_lexicon = true;  // false：單字表外的字母串（english_letter_runs）或數字
   bool digits = false;     // 整段數字（digit_runs）
+  bool short_word = false; // 比 english_min_length 短、靠後面的空白才收的單字表詞（english_space_min_length）
 };
 
 size_t utf8_length(const string& text) {
@@ -1542,6 +1547,8 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
   const size_t n = input_.length();
   const size_t min_length =
       static_cast<size_t>((std::max)(1, translator_->english_min_length()));
+  const size_t space_min_length = static_cast<size_t>(
+      (std::max)(1, translator_->english_space_min_length()));
   // 1. 連續的小寫字母裡，單字表對得上的每一段；有判斷表又開了 english_letter_runs 時，
   //    整串字母（頭尾各少 0–english_letter_trim 個）也算一段，通不通交給判斷
   vector<EnglishSpan> spans;
@@ -1553,12 +1560,22 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
     size_t run_end = i;
     while (run_end < n && is_lowercase_letter(input_[run_end]))
       ++run_end;
+    // 後面緊接空白時，整串字母剛好是一個單字表詞的可以短到 english_space_min_length（AI 空白）；
+    // 長串裡的一小段不算（auto 空白的 to、xbox 空白的 box 會把對的長詞拆開）
+    const bool space_after = translator_->english_space() && run_end < n &&
+                             input_[run_end] == ' ';
+    const size_t first_min =
+        space_after ? (std::min)(min_length, space_min_length) : min_length;
     for (size_t a = i; a < run_end; ++a) {
-      for (size_t b = a + min_length;
+      for (size_t b = a + first_min;
            b <= run_end && b - a <= lexicon->max_length(); ++b) {
+        if (b - a < min_length && (a != i || b != run_end))
+          continue;
         double zipf = 0.0;
-        if (lexicon->Find(input_.substr(a, b - a), &zipf))
+        if (lexicon->Find(input_.substr(a, b - a), &zipf)) {
           spans.push_back({a, b, zipf});
+          spans.back().short_word = b - a < min_length;
+        }
       }
     }
     if (judge && translator_->english_letter_runs()) {
@@ -1716,7 +1733,8 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
       }
       // 開頭就是英文詞：另給那個詞（不是整句，不參加判斷，排在英文句後面）。
       // 單字表外的字母串、數字不另給（它們排在 english_letter_position，開頭那段不該擠到第二）
-      if (last.in_lexicon && (!word || last.length() > word->end() - start_)) {
+      if (last.in_lexicon && !last.short_word &&
+          (!word || last.length() > word->end() - start_)) {
         auto entry = make_entry(last);
         entry->preedit = entry->text;
         word = New<Phrase>(translator_->language(), "english", start_,
@@ -1872,8 +1890,11 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
     // 單字表外的字母串、數字：沒排第一時排在 english_letter_position。第一候選是蓋住整段的一個詞時
     // 不當候選（不佔 english_max_sentences 的名額），輪到下一個英文候選判斷
     bool fallback = false;
-    for (const auto& s : *m.config)
+    bool late = false;  // 沒排第一時排在 english_letter_position（短的單字表詞也是：不擠掉第二名的中文）
+    for (const auto& s : *m.config) {
       fallback = fallback || !s.in_lexicon;
+      late = late || !s.in_lexicon || s.short_word;
+    }
     if (fallback && whole_word)
       continue;
     if (seen.insert(m.cand->text()).second) {
@@ -1884,7 +1905,7 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
         first_here = promote && m.margin > 0;
         english_first_ = first_here;
       }
-      if (fallback && !first_here)
+      if (late && !first_here)
         english_late_.push_back(m.cand);
       else
         english_.push_back(m.cand);
@@ -1920,7 +1941,8 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
     vector<EnglishSpan> config;
     for (const auto& seg : path) {
       double zipf = 0;
-      if (lexicon->Find(input_.substr(seg.first, seg.second - seg.first),
+      if (seg.second - seg.first >= min_length &&
+          lexicon->Find(input_.substr(seg.first, seg.second - seg.first),
                         &zipf))
         config.push_back({seg.first, seg.second, zipf});
       else

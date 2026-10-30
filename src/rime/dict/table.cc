@@ -31,6 +31,16 @@ TableAccessor::TableAccessor(const Code& index_code,
       credibility_(credibility),
       quality_len_(quality_len) {}
 
+TableAccessor::TableAccessor(Code&& index_code,
+                             const List<table::Entry>* list,
+                             double credibility,
+                             double quality_len)
+    : index_code_(std::move(index_code)),
+      entries_(list->at.get()),
+      size_(list->size),
+      credibility_(credibility),
+      quality_len_(quality_len) {}
+
 TableAccessor::TableAccessor(const Code& index_code,
                              const Array<table::Entry>* array,
                              double credibility,
@@ -568,6 +578,32 @@ TableAccessor Table::QueryPhrases(const Code& code) {
 // log(0.05) ≈ -3.0
 const double kPenaltyForAmbiguousSyllable = -2.995732274;
 
+// 蓬萊：Table::Query 的 BFS 狀態。跟 TableQuery 一樣走三層索引、累加 credibility 和 quality_len，
+// 只是碼放固定長度的陣列、不帶 vector，進佇列不配置記憶體（原本每推一個狀態要複製四個 vector）
+namespace {
+
+struct QueryState {
+  size_t pos;
+  size_t level;
+  SyllableId code[Code::kIndexCodeMaxLength];
+  double credibility;  // TableQuery::credibility_sum()
+  double quality_len;  // TableQuery::quality_len_sum()
+  table::TrunkIndex* lv2;
+  table::TrunkIndex* lv3;
+  table::TailIndex* lv4;
+
+  Code MakeCode(SyllableId last) const {
+    Code c;
+    c.reserve(level + 1);
+    c.assign(code, code + level);
+    if (last >= 0)
+      c.push_back(last);
+    return c;
+  }
+};
+
+}  // namespace
+
 bool Table::Query(const SyllableGraph& syll_graph,
                   size_t start_pos,
                   TableQueryResult* result,
@@ -575,58 +611,85 @@ bool Table::Query(const SyllableGraph& syll_graph,
   if (!result || !index_ || start_pos >= syll_graph.interpreted_length)
     return false;
   result->clear();
-  std::queue<pair<size_t, TableQuery>> q;
-  TableQuery initial_state(index_);
-  q.push({start_pos, initial_state});
-  while (!q.empty()) {
-    size_t current_pos = q.front().first;
-    TableQuery query(q.front().second);
-    q.pop();
+  // 蓬萊：結果跟原本照 TableQuery 一步一步走的相同（同樣的順序推進佇列、同樣的順序收結果）。
+  // 每個音節只找一次節點，Access 和 Walk 共用；沒有詞的節點不建 TableAccessor
+  vector<QueryState> q;
+  q.push_back({start_pos, 0, {}, 0, 0, nullptr, nullptr, nullptr});
+  for (size_t head = 0; head < q.size(); ++head) {
+    const QueryState query = q[head];
+    size_t current_pos = query.pos;
     if (watermark && current_pos > *watermark)
       *watermark = current_pos;
     auto index = syll_graph.indices.find(current_pos);
     if (index == syll_graph.indices.end()) {
       continue;
     }
-    if (query.level() == Code::kIndexCodeMaxLength) {
-      TableAccessor accessor(query.Access(-1));
-      if (!accessor.exhausted()) {
-        (*result)[current_pos].push_back(accessor);
+    if (query.level == Code::kIndexCodeMaxLength) {
+      // TableQuery::Access(-1)
+      if (query.lv4 && query.lv4->size) {
+        (*result)[current_pos].push_back(TableAccessor(
+            query.MakeCode(-1), query.lv4, 0 + query.credibility,
+            0 + query.quality_len));
       }
       continue;
     }
     for (const auto& spellings : index->second) {
       SyllableId syll_id = spellings.first;
+      // 這一層的節點（TableQuery::Access、Walk 找的是同一個）
+      const List<table::Entry>* entries = nullptr;
+      const OffsetPtr<table::PhraseIndex>* next_level = nullptr;
+      if (query.level == 0) {
+        if (syll_id >= 0 && syll_id < static_cast<SyllableId>(index_->size)) {
+          auto node = &index_->at[syll_id];
+          entries = &node->entries;
+          next_level = &node->next_level;
+        }
+      } else {
+        auto trunk = query.level == 1 ? query.lv2 : query.lv3;
+        if (trunk) {
+          auto node = find_node(trunk->begin(), trunk->end(), syll_id);
+          if (node != trunk->end()) {
+            entries = &node->entries;
+            next_level = &node->next_level;
+          }
+        }
+      }
+      if (!entries)
+        continue;  // Access 是空的、Walk 失敗
+      const bool has_entries = entries->size && entries->at;
+      const bool can_advance = *next_level;
       for (auto props : spellings.second) {
         size_t end_pos = props->end_pos;
         if (watermark && end_pos > *watermark)
           *watermark = end_pos;
 
         double penalty = 0.0;
-        if (false) {
-          size_t last_pos = query.last_pos();
-          if (props->ambiguous_source_positions.count(last_pos)) {
-            penalty = kPenaltyForAmbiguousSyllable;
-            DLOG(INFO) << "conditional penalty applied: ambiguous path ["
-                       << last_pos << ", " << end_pos << ")";
-          }
-        }
         double next_credibility = props->credibility + penalty;
 
         // 全碼匹配長度積分
         bool is_normal_spelling = props->type == kNormalSpelling;
         double delta_quality_len =
             (is_normal_spelling ? 1.0 : 0.0) * (end_pos - current_pos);
-        TableAccessor accessor =
-            query.Access(syll_id, next_credibility, delta_quality_len);
-        if (!accessor.exhausted()) {
-          (*result)[end_pos].push_back(accessor);
+        if (has_entries) {
+          (*result)[end_pos].push_back(TableAccessor(
+              query.MakeCode(syll_id), entries,
+              next_credibility + query.credibility,
+              delta_quality_len + query.quality_len));
         }
-        if (end_pos < syll_graph.interpreted_length &&
-            query.Advance(syll_id, next_credibility, delta_quality_len,
-                          current_pos)) {
-          q.push({end_pos, query});
-          query.Backdate();
+        if (end_pos < syll_graph.interpreted_length && can_advance) {
+          QueryState next = query;
+          next.pos = end_pos;
+          next.code[query.level] = syll_id;
+          next.level = query.level + 1;
+          next.credibility = query.credibility + next_credibility;
+          next.quality_len = query.quality_len + delta_quality_len;
+          if (query.level == 0)
+            next.lv2 = &(*next_level)->trunk();
+          else if (query.level == 1)
+            next.lv3 = &(*next_level)->trunk();
+          else
+            next.lv4 = &(*next_level)->tail();
+          q.push_back(next);
         }
       }
     }

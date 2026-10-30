@@ -26,27 +26,32 @@ string UserDbValue::Pack() const {
 }
 
 bool UserDbValue::Unpack(const string& value) {
-  vector<string> kv;
-  boost::split(kv, value, boost::is_any_of(" "));
-  for (const string& k_eq_v : kv) {
-    size_t eq = k_eq_v.find('=');
-    if (eq == string::npos)
-      continue;
-    string k(k_eq_v.substr(0, eq));
-    string v(k_eq_v.substr(eq + 1));
-    try {
-      if (k == "c") {
-        commits = std::stoi(v);
-      } else if (k == "d") {
-        dee = (std::min)(10000.0, std::stod(v));
-      } else if (k == "t") {
-        tick = std::stoul(v);
+  // 蓬萊：同 boost::split(value, is_any_of(" ")) 逐段處理，不另外配置 vector 和 key 字串
+  //（學習紀錄每查到一筆就解一次，原本佔查學習紀錄的一成多）
+  for (size_t begin = 0; begin <= value.length();) {
+    size_t end = value.find(' ', begin);
+    if (end == string::npos)
+      end = value.length();
+    size_t eq = value.find('=', begin);
+    if (eq != string::npos && eq < end) {
+      const bool one = eq - begin == 1;
+      const char k = value[begin];
+      string v(value, eq + 1, end - eq - 1);
+      try {
+        if (one && k == 'c') {
+          commits = std::stoi(v);
+        } else if (one && k == 'd') {
+          dee = (std::min)(10000.0, std::stod(v));
+        } else if (one && k == 't') {
+          tick = std::stoul(v);
+        }
+      } catch (...) {
+        LOG(ERROR) << "failed in parsing key-value from userdb entry '"
+                   << value.substr(begin, end - begin) << "'.";
+        return false;
       }
-    } catch (...) {
-      LOG(ERROR) << "failed in parsing key-value from userdb entry '" << k_eq_v
-                 << "'.";
-      return false;
     }
+    begin = end + 1;
   }
   return true;
 }

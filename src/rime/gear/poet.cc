@@ -211,9 +211,10 @@ an<Sentence> Poet::MakeSentenceWithStrategy(const WordGraph& graph,
         auto& target_state = states[end_pos];
         // extend candidates with dict entries on a valid edge.
         const DictEntryList& entries = ev.second;
+        // 蓬萊：前文每個來源只算一次（原本每個詞都重組一次字串）
+        const string context =
+            candidate.empty() ? preceding_text : candidate.context();
         for (const auto& entry : entries) {
-          const string& context =
-              candidate.empty() ? preceding_text : candidate.context();
           double weight = candidate.weight +
                           Grammar::Evaluate(context, entry->text, entry->weight,
                                             is_rear, grammar_.get());
@@ -308,9 +309,10 @@ deque<an<Sentence>> Poet::MakeSentences(const WordGraph& graph,
       auto& target_state = states[end_pos];
 
       for (const auto& source_line : source_state) {
+        // 蓬萊：前文每個來源只算一次（原本每個詞都重組一次字串）
+        const string context =
+            source_line.empty() ? preceding_text : source_line.context();
         for (const auto& entry : entries) {
-          const string& context =
-              source_line.empty() ? preceding_text : source_line.context();
           double weight = source_line.weight +
                           Grammar::Evaluate(context, entry->text, entry->weight,
                                             is_rear, grammar_.get());

@@ -108,6 +108,11 @@ class TableAccessor {
                 const List<table::Entry>* entries,
                 double credibility = 0.0,
                 double quality_len = 0.0);
+  // 蓬萊：Table::Query 用，碼直接搬進來不複製
+  TableAccessor(Code&& index_code,
+                const List<table::Entry>* entries,
+                double credibility,
+                double quality_len);
   TableAccessor(const Code& index_code,
                 const Array<table::Entry>* entries,
                 double credibility = 0.0,

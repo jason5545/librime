@@ -707,8 +707,9 @@ bool Table::Query(const SyllableGraph& syll_graph,
     if (!trunk)
       continue;  // Walk 失敗：每個音節都找不到節點
     // 第二、三層：音節（spelling_index）和這一層的節點（trunk）都照音節編號由小到大排，原本每個音節各自
-    // 在節點裡二分搜尋（find_node）。改成照順序往後找、節點找完就停；節點比音節少很多時反過來，逐一找音節。
-    // 處理的音節、順序都跟原本相同（節點的編號不重複時；重複時原本只會找到第一個，這裡也只用第一個）
+    // 在節點裡二分搜尋（find_node）。兩邊平均各 30 多個、對上的平均只有一個多：兩邊輪流往後指數搜尋
+    // （這邊找第一個不比那邊小的），成本跟著對上的個數走。處理的音節、順序都跟原本相同
+    //（節點的編號不重複時；重複時原本只會找到第一個，這裡也只用第一個）
     if (spelling_index.empty())
       continue;
     // 只看編號落在這些音節最小到最大之間的節點（簡拼的音節是連續的一段）
@@ -719,37 +720,41 @@ bool Table::Query(const SyllableGraph& syll_graph,
     target.key = spelling_index.rbegin()->first;
     table::TrunkIndexNode* last =
         std::upper_bound(first, trunk->end(), target, node_less);
-    if (first == last)
-      continue;
-    if (static_cast<size_t>(last - first) * 4 < spelling_index.size()) {
-      for (auto node = first; node != last; ++node) {
-        if (node != trunk->begin() && (node - 1)->key == node->key)
-          continue;
-        auto found = spelling_index.find(node->key);
-        if (found != spelling_index.end())
-          visit(node->key, found->second, &node->entries, &node->next_level);
-      }
-    } else {
-      auto node = first;
-      for (const auto& spellings : spelling_index) {
-        SyllableId syll_id = spellings.first;
-        // 從上一個位置往後指數搜尋
-        if (node->key < syll_id) {
-          size_t step = 1;
-          auto lo = node + 1;
-          while (lo + step < last && (lo + step - 1)->key < syll_id) {
-            lo += step;
-            step <<= 1;
-          }
-          target.key = syll_id;
-          node = std::lower_bound(lo, (std::min)(lo + step, last), target,
-                                  node_less);
-          if (node == last)
-            break;
+    auto syll = spelling_index.begin();
+    const auto syll_end = spelling_index.end();
+    auto node = first;
+    while (syll != syll_end && node != last) {
+      if (node->key < syll->first) {
+        // [node + 1, last) 裡第一個編號 ≥ 這個音節的節點
+        const SyllableId id = syll->first;
+        auto lo = node + 1;
+        size_t step = 1;
+        while (lo + step <= last && (lo + step - 1)->key < id) {
+          lo += step;
+          step <<= 1;
         }
-        if (syll_id < node->key)
-          continue;
-        visit(syll_id, spellings.second, &node->entries, &node->next_level);
+        auto hi = (std::min)(lo + step - 1, last);
+        target.key = id;
+        node = std::lower_bound(lo, hi, target, node_less);
+      } else if (syll->first < node->key) {
+        // 往後第一個編號 ≥ 這個節點的音節
+        const SyllableId key = node->key;
+        auto lo = syll + 1;
+        size_t step = 1;
+        while (static_cast<size_t>(syll_end - lo) >= step &&
+               (lo + (step - 1))->first < key) {
+          lo += step;
+          step <<= 1;
+        }
+        auto hi = lo + (std::min)(static_cast<size_t>(syll_end - lo), step - 1);
+        syll = std::lower_bound(
+            lo, hi, key,
+            [](const SpellingIndex::value_type& x, SyllableId k) {
+              return x.first < k;
+            });
+      } else {
+        visit(syll->first, syll->second, &node->entries, &node->next_level);
+        ++syll;  // 節點留著：下一個音節比它大，下一輪往後找（重複的節點跟著跳過）
       }
     }
   }

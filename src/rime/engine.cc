@@ -307,6 +307,18 @@ inline void CreateComponentsFromList(Engine* engine,
       if (!prescription)
         continue;
       Ticket ticket{engine, component_type, prescription->str()};
+      // 蓬萊：lua_processor@*penglai_tap@penglai_tap 這種寫法，有註冊「lua_processor:*penglai_tap」的元件
+      // （蓬萊外掛模組，原本是 Lua 的）時改用它，不載 Lua。票據照 librime-lua 的拆法：@ 後面那段是命名空間，
+      // 沒寫時命名空間是 *penglai_tap。方案檔、custom 檔不用改
+      if (ticket.klass.compare(0, 4, "lua_") == 0) {
+        Ticket inner{engine, ticket.name_space, ticket.name_space};
+        if (auto native = T::Require(ticket.klass + ":" + inner.klass)) {
+          if (auto component = native->Create(inner)) {
+            target_collection.push_back(an<T>(component));
+            continue;
+          }
+        }
+      }
       auto c = T::Require(ticket.klass);
       if (!c) {
         LOG(ERROR) << "error creating " << component_type << ": '"

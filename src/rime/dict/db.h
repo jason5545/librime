@@ -32,6 +32,12 @@ class DbAccessor {
     return true;
   }
   virtual bool exhausted() = 0;
+  // 蓬萊：學習紀錄的記憶體副本：Jump、GetNextRecord 走的那個照 key 排好的陣列（到 accessor 釋放之前都有效，
+  // 不會被改）；其他 accessor、或有前綴限制的是 nullptr
+  virtual const vector<pair<string, string>>* SortedRecords() { return nullptr; }
+  // 蓬萊：下一次 GetNextRecord 從第 index 筆讀；RecordIndex 是現在的下一筆（只有 SortedRecords 不是 nullptr 的才支援）
+  virtual void SeekRecord(size_t index) {}
+  virtual size_t RecordIndex() { return 0; }
 
  protected:
   bool MatchesPrefix(const string& key);

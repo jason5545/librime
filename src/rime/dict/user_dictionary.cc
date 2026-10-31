@@ -15,6 +15,7 @@
 #include <rime/service.h>
 #include <rime/ticket.h>
 #include <rime/algo/dynamics.h>
+#include <cstring>
 #include <rime/algo/syllabifier.h>
 #include <rime/algo/strings.h>
 #include <rime/dict/db.h>
@@ -39,6 +40,23 @@ struct DfsState {
   const string* key = &kEmpty;
   const string* value = &kEmpty;
   static const string kEmpty;
+  // 蓬萊：記憶體副本的整個陣列（SortedRecords；沒有時 nullptr，照原本一個一個音節 Jump），
+  // 和已知的前綴範圍 [lo, hi)（最上層是整個陣列，DfsLookup 算過自己這一層的才放進來）
+  const vector<pair<string, string>>* rows = nullptr;
+  vector<pair<size_t, size_t>> ranges;
+
+  // 讀取位置設成「Jump 到第 index 筆、再讀一筆」之後的樣子（跟 ForwardScan 的結果相同）
+  void PlaceAfter(size_t index) {
+    if (index < rows->size()) {
+      key = &(*rows)[index].first;
+      value = &(*rows)[index].second;
+      accessor->SeekRecord(index + 1);
+    } else {
+      key = &kEmpty;
+      value = &kEmpty;
+      accessor->SeekRecord(rows->size());
+    }
+  }
 
   size_t depth() const { return code.size(); }
 
@@ -78,6 +96,70 @@ struct DfsState {
 };
 
 const string DfsState::kEmpty;
+
+namespace {
+
+// 蓬萊：key 從第 base 個位元組起，跟 syllable＋' ' 逐位元組（unsigned，同 std::string 的比較）比：
+// -1 比較小、0 以它開頭、1 比較大（不以它開頭）
+int compare_after(const string& key, size_t base, const string& syllable) {
+  const size_t rest = key.size() - base;
+  const size_t n = (std::min)(rest, syllable.size());
+  int c = std::memcmp(key.data() + base, syllable.data(), n);
+  if (c != 0)
+    return c < 0 ? -1 : 1;
+  if (rest <= syllable.size())
+    return -1;  // key 剩下的是 syllable 的前段（或剛好是它，少了空白）
+  const unsigned char next = key[base + syllable.size()];
+  if (next == ' ')
+    return 0;
+  return next < ' ' ? -1 : 1;
+}
+
+
+// 蓬萊：syllable＋' ' 是否小於 other＋' '（ForwardScan 的前綴照這個順序）
+bool syllable_less(const string& syllable, const string& other) {
+  const size_t n = (std::min)(syllable.size(), other.size());
+  int c = std::memcmp(syllable.data(), other.data(), n);
+  if (c != 0)
+    return c < 0;
+  if (syllable.size() == other.size())
+    return false;
+  // 短的那個接著是 ' '，跟長的那個的下一個位元組比
+  if (syllable.size() < other.size())
+    return ' ' < static_cast<unsigned char>(other[n]);
+  return static_cast<unsigned char>(syllable[n]) < ' ';
+}
+
+// 蓬萊：[from, to) 裡第一筆 compare_after ≥ 0 的（from 之前的都比較小），從 from 往後指數搜尋
+size_t gallop_after(const vector<pair<string, string>>& rows,
+                    size_t from,
+                    size_t to,
+                    size_t base,
+                    const string& syllable) {
+  if (from >= to || compare_after(rows[from].first, base, syllable) >= 0)
+    return from;
+  size_t lo = from + 1;  // lo 之前的都比較小
+  size_t step = 1;
+  while (true) {
+    size_t probe = lo + step - 1;
+    if (probe >= to) {
+      probe = to;
+      break;
+    }
+    if (compare_after(rows[probe].first, base, syllable) >= 0)
+      break;
+    lo = probe + 1;
+    step <<= 1;
+  }
+  size_t end = (std::min)(lo + step, to);  // 答案在 [lo, end] 之間（end 可能是 to）
+  return std::partition_point(rows.begin() + lo, rows.begin() + end,
+                              [&](const pair<string, string>& row) {
+                                return compare_after(row.first, base,
+                                                     syllable) < 0;
+                              }) -
+         rows.begin();
+}
+}  // namespace
 
 void DfsState::RecruitEntry(size_t pos,
                             hash_map<string, SyllableId>* syllabary) {
@@ -238,11 +320,127 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
     return;
   }
   DLOG(INFO) << "dfs lookup starts from " << current_pos;
+  // 蓬萊：簡拼的頂點一次 40–90 個音節，接在前綴後面的學習紀錄通常只有幾筆、對得上的不到 2%。
+  // 有記憶體副本時，先找出前綴在陣列裡的範圍 [lo, hi)（最上層是整個陣列；下一層從上一層停的那一筆往兩邊找），
+  // 每個音節找範圍裡第一筆 ≥「前綴＋音節＋空白」的：跟 ForwardScan 的 Jump 落在同一筆（整個陣列的
+  // lower_bound 一定在範圍裡）。音節照拼法順序來，從上一個音節找到的地方往後找（不照順序時從範圍開頭找）。
+  // 範圍裡沒有以它開頭的音節不必 Jump、讀那一筆：原本那樣做只會更新水位、把讀取位置留在 lower_bound，
+  // 不會收詞也不會往下走。這裡照樣更新水位，讀取位置先記著（pending），要用之前（下一個要處理的音節、
+  // 回傳給上一層之前）才設成原本會停的那一筆；下面原本的「前綴對不上就提早結束」也照那一筆判斷。
+  // 收到的詞、順序、水位、讀取位置都跟一個一個 Jump 相同
+  const auto* rows = state->rows;
+  const bool filter = rows && !state->ranges.empty();
+  size_t lo = 0, hi = 0;
+  if (filter) {
+    const auto& outer = state->ranges.back();
+    if (current_prefix.empty()) {
+      lo = outer.first;
+      hi = outer.second;
+    } else {
+      const size_t at = state->accessor->RecordIndex();
+      if (at > 0 && at <= rows->size() &&
+          boost::starts_with((*rows)[at - 1].first, current_prefix)) {
+        // 上一層剛讀到的那一筆以前綴開頭：範圍從那裡往兩邊找
+        lo = at - 1;
+        while (lo > outer.first &&
+               boost::starts_with((*rows)[lo - 1].first, current_prefix))
+          --lo;
+        hi = at;
+        size_t step = 1;
+        while (hi < outer.second &&
+               boost::starts_with((*rows)[hi].first, current_prefix)) {
+          // 往後指數搜尋
+          size_t probe = (std::min)(hi + step, outer.second) - 1;
+          if (boost::starts_with((*rows)[probe].first, current_prefix)) {
+            hi = probe + 1;
+            step <<= 1;
+          } else {
+            hi = std::partition_point(
+                     rows->begin() + hi, rows->begin() + probe,
+                     [&](const pair<string, string>& row) {
+                       return boost::starts_with(row.first, current_prefix);
+                     }) -
+                 rows->begin();
+            break;
+          }
+        }
+      } else {
+        auto begin = std::lower_bound(
+            rows->begin() + outer.first, rows->begin() + outer.second,
+            current_prefix,
+            [](const pair<string, string>& row, const string& k) {
+              return row.first < k;
+            });
+        auto end = std::partition_point(
+            begin, rows->begin() + outer.second,
+            [&](const pair<string, string>& row) {
+              return boost::starts_with(row.first, current_prefix);
+            });
+        lo = begin - rows->begin();
+        hi = end - rows->begin();
+      }
+    }
+    state->ranges.emplace_back(lo, hi);
+  }
+  BOOST_SCOPE_EXIT((&state)(filter)) {
+    if (filter)
+      state->ranges.pop_back();
+  }
+  BOOST_SCOPE_EXIT_END
+  bool pending = false;
+  size_t pending_index = 0;
+  auto settle = [&]() {
+    if (pending) {
+      state->PlaceAfter(pending_index);
+      pending = false;
+    }
+  };
+  const size_t base = current_prefix.size();
+  size_t cursor = lo;               // 上一個音節的 lower_bound
+  const string* last_syllable = nullptr;
   string prefix;
   for (const auto& spelling : index->second) {
     DLOG(INFO) << "prefix: '" << current_prefix << "'"
                << ", syll_id: " << spelling.first
                << ", num_spellings: " << spelling.second.size();
+    if (filter) {
+      const string& syllable = SyllableSpelling(spelling.first);
+      if (syllable.empty()) {  // AppendSyllableToPrefix 失敗：原本直接換下一個音節
+        LOG(ERROR) << "Error translating syllable_id '" << spelling.first
+                   << "'.";
+        continue;
+      }
+      if (last_syllable && syllable_less(syllable, *last_syllable))
+        cursor = lo;
+      last_syllable = &syllable;
+      cursor = gallop_after(*rows, cursor, hi, base, syllable);
+      const size_t found = cursor;
+      if (found < hi && compare_after((*rows)[found].first, base, syllable) == 0) {
+        settle();  // 學習紀錄裡有：照原本的做法處理這個音節
+      } else {
+        if (!spelling.second.empty()) {  // 沒有邊時原本不 Jump，讀取位置不動
+          for (size_t i = 0; i < spelling.second.size(); ++i) {
+            auto props = spelling.second[i];
+            if (i > 0 && props->type >= kAbbreviation)
+              continue;
+            if (props->end_pos > state->watermark)
+              state->watermark = props->end_pos;
+          }
+          pending = true;
+          pending_index = found;
+        }
+        // 原本的提早結束：讀取位置那一筆不是以前綴開頭（前綴是空的時候一定對得上，讀到底的空字串也算）
+        const bool in_range =
+            current_prefix.empty() ||
+            (pending ? pending_index < hi
+                     : boost::starts_with(*state->key, current_prefix));
+        if (!in_range) {
+          settle();
+          return;
+        }
+        continue;
+      }
+    }
     state->code.push_back(spelling.first);
     BOOST_SCOPE_EXIT((&state)) {
       state->code.pop_back();
@@ -319,6 +517,7 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
       return;
     // 'b |e ' vs. 'b y \tBy'
   }
+  settle();
 }
 
 static an<UserDictEntryCollector> collect(
@@ -356,6 +555,10 @@ an<UserDictEntryCollector> UserDictionary::Lookup(
   else
     state.accessor = db_->Query("");
   state.accessor->Jump(" ");  // skip metadata
+  // 蓬萊：記憶體副本只放 key ≥ " " 的詞條，最上層的範圍就是整個陣列
+  state.rows = state.accessor->SortedRecords();
+  if (state.rows)
+    state.ranges.emplace_back(0, state.rows->size());
   string prefix;
   DfsLookup(syll_graph, start_pos, prefix, &state);
   if (watermark && state.watermark > *watermark)
@@ -561,16 +764,32 @@ size_t UserDictionary::data_version() const {
   return LevelDb::NewVersion();
 }
 
+const string& UserDictionary::SyllableSpelling(SyllableId syllable_id) {
+  // 蓬萊：查過的放進陣列（指著 rev_syllabary_ 的值；boost::unordered_map 的元素位址不會變）
+  if (syllable_id >= 0 &&
+      static_cast<size_t>(syllable_id) < spelling_by_id_.size() &&
+      spelling_by_id_[syllable_id])
+    return *spelling_by_id_[syllable_id];
+  auto found = rev_syllabary_.find(syllable_id);
+  const string& spelling =
+      found != rev_syllabary_.end()
+          ? found->second
+          : (rev_syllabary_[syllable_id] =
+                 table_->GetSyllableById(syllable_id));
+  if (syllable_id >= 0 && syllable_id < (1 << 20)) {
+    if (static_cast<size_t>(syllable_id) >= spelling_by_id_.size())
+      spelling_by_id_.resize(syllable_id + 1, nullptr);
+    spelling_by_id_[syllable_id] = &spelling;
+  }
+  return spelling;
+}
+
 bool UserDictionary::AppendSyllableToPrefix(SyllableId syllable_id,
                                             const string& base,
                                             string* result) {
   if (!table_ || !result)
     return false;
-  auto found = rev_syllabary_.find(syllable_id);
-  const string& spelling =
-      found != rev_syllabary_.end()
-          ? found->second
-          : (rev_syllabary_[syllable_id] = table_->GetSyllableById(syllable_id));
+  const string& spelling = SyllableSpelling(syllable_id);
   if (spelling.empty()) {
     LOG(ERROR) << "Error translating syllable_id '" << syllable_id << "'.";
     result->clear();

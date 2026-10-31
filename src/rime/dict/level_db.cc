@@ -175,6 +175,13 @@ class LevelDbMirrorAccessor : public DbAccessor {
     return true;
   }
 
+  const vector<pair<string, string>>* SortedRecords() override {
+    return prefix_.empty() ? &mirror_->rows : nullptr;
+  }
+
+  void SeekRecord(size_t index) override { pos_ = index; }
+  size_t RecordIndex() override { return pos_; }
+
   bool exhausted() override {
     return pos_ >= mirror_->rows.size() ||
            !MatchesPrefix(mirror_->rows[pos_].first);

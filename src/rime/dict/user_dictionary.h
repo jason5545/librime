@@ -114,6 +114,9 @@ class UserDictionary : public Class<UserDictionary, const Ticket&> {
   bool AppendSyllableToPrefix(SyllableId syllable_id,
                               const string& base,
                               string* result);
+  // 蓬萊：音節編號的拼法（查過的記著；查不到是空字串）
+  const string& SyllableSpelling(SyllableId syllable_id);
+
   void DfsLookup(const SyllableGraph& syll_graph,
                  size_t current_pos,
                  const string& current_prefix,
@@ -126,6 +129,7 @@ class UserDictionary : public Class<UserDictionary, const Ticket&> {
   an<Prism> prism_;
   hash_map<string, SyllableId> syllabary_;
   hash_map<SyllableId, string> rev_syllabary_;
+  vector<const string*> spelling_by_id_;  // 蓬萊：SyllableSpelling 的快取
   TickCount tick_ = 0;
   time_t transaction_time_ = 0;
 };

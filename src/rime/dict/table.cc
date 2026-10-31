@@ -635,7 +635,7 @@ bool Table::Query(const SyllableGraph& syll_graph,
     }
     // 找到節點的音節：收詞、往下一層（TableQuery::Access、Walk 找的是同一個節點）
     auto visit = [&](SyllableId syll_id,
-                     const vector<const EdgeProperties*>& spellings,
+                     const SpellingPropertiesList& spellings,
                      const List<table::Entry>* entries,
                      const OffsetPtr<table::PhraseIndex>* next_level) {
       const bool has_entries = entries->size && entries->at;

@@ -172,9 +172,9 @@ TEST_F(RimeTableTest, QueryWithSyllableGraph) {
   g.edges[4][7][3].end_pos = 7;
   g.edges[7][9][4].type = rime::kNormalSpelling;
   g.edges[7][9][4].end_pos = 9;
-  g.indices[0][1].push_back(&g.edges[0][2][1]);
-  g.indices[2][2].push_back(&g.edges[2][4][2]);
-  g.indices[4][3].push_back(&g.edges[4][7][3]);
+  g.indices[0].Add(1, &g.edges[0][2][1]);
+  g.indices[2].Add(2, &g.edges[2][4][2]);
+  g.indices[4].Add(3, &g.edges[4][7][3]);
   g.indices[7][4].push_back(&g.edges[7][9][4]);
 
   rime::TableQueryResult result;

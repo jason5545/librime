@@ -9,6 +9,7 @@
 #define RIME_SYLLABIFIER_H_
 
 #include <stdint.h>
+#include <algorithm>
 #include <rime_api.h>
 #include <rime/common.h>
 #include "spelling.h"
@@ -32,8 +33,120 @@ using VertexMap = map<size_t, SpellingType>;
 using EndVertexMap = map<size_t, SpellingMap>;
 using EdgeMap = map<size_t, EndVertexMap>;
 
-using SpellingPropertiesList = vector<const EdgeProperties*>;
-using SpellingIndex = map<SyllableId, SpellingPropertiesList>;
+// 蓬萊：一個音節的邊（指著 SpellingIndex 裡連續的一段，跟原本的 vector 一樣可以 size()、[i]、range-for）
+class SpellingPropertiesList {
+ public:
+  using const_iterator = const EdgeProperties* const*;
+  SpellingPropertiesList() = default;
+  SpellingPropertiesList(const_iterator b, const_iterator e)
+      : begin_(b), end_(e) {}
+  const_iterator begin() const { return begin_; }
+  const_iterator end() const { return end_; }
+  size_t size() const { return end_ - begin_; }
+  bool empty() const { return begin_ == end_; }
+  const EdgeProperties* operator[](size_t i) const { return begin_[i]; }
+
+ private:
+  const_iterator begin_ = nullptr;
+  const_iterator end_ = nullptr;
+};
+
+// 蓬萊：一個頂點出去的「音節 → 邊」，原本是 map<SyllableId, vector<const EdgeProperties*>>。
+// 改成兩個連續的陣列（音節照編號由小到大、每個音節的邊照原本 push_back 的順序），走訪的順序、內容都跟 map 相同；
+// Transpose 每個頂點配置兩次，不是每個音節一個 map 節點加一個 vector，查詢走訪、find 也不用跟著指標跳
+class SpellingIndex {
+ public:
+  using value_type = pair<SyllableId, SpellingPropertiesList>;
+  using const_iterator = vector<value_type>::const_iterator;
+  using const_reverse_iterator = vector<value_type>::const_reverse_iterator;
+
+  SpellingIndex() = default;
+  SpellingIndex(const SpellingIndex& other) { *this = other; }
+  SpellingIndex& operator=(const SpellingIndex& other) {
+    if (this != &other) {
+      items_ = other.items_;
+      props_ = other.props_;
+      Rebase();
+    }
+    return *this;
+  }
+  // vector 搬走時緩衝區不變，指標照樣有效
+  SpellingIndex(SpellingIndex&&) = default;
+  SpellingIndex& operator=(SpellingIndex&&) = default;
+
+  const_iterator begin() const { return items_.begin(); }
+  const_iterator end() const { return items_.end(); }
+  const_reverse_iterator rbegin() const { return items_.rbegin(); }
+  const_reverse_iterator rend() const { return items_.rend(); }
+  size_t size() const { return items_.size(); }
+  bool empty() const { return items_.empty(); }
+  const_iterator find(SyllableId syllable_id) const {
+    auto it = std::lower_bound(
+        items_.begin(), items_.end(), syllable_id,
+        [](const value_type& x, SyllableId id) { return x.first < id; });
+    return it != items_.end() && it->first == syllable_id ? it : items_.end();
+  }
+  // 沒有這個音節時是空的
+  SpellingPropertiesList operator[](SyllableId syllable_id) const {
+    auto it = find(syllable_id);
+    return it != items_.end() ? it->second : SpellingPropertiesList();
+  }
+
+  // 重建：先 Reset(邊的總數)，再照音節編號由小到大 Append（同一個音節照原本 push_back 的順序）。
+  // props_ 預留了總數，Append 不會搬家，指著它的範圍一直有效
+  void Reset(size_t total) {
+    items_.clear();
+    props_.clear();
+    items_.reserve(total);
+    props_.reserve(total);
+  }
+  void Append(SyllableId syllable_id, const EdgeProperties* props) {
+    props_.push_back(props);
+    const EdgeProperties* const* last = props_.data() + props_.size();
+    if (items_.empty() || items_.back().first != syllable_id)
+      items_.emplace_back(syllable_id, SpellingPropertiesList(last - 1, last));
+    else
+      items_.back().second =
+          SpellingPropertiesList(items_.back().second.begin(), last);
+  }
+  // 原本的 index[syllable_id].push_back(props)：接在那個音節的最後面
+  void Add(SyllableId syllable_id, const EdgeProperties* props) {
+    vector<pair<SyllableId, const EdgeProperties*>> all;
+    bool added = false;
+    for (const auto& item : items_) {
+      if (!added && syllable_id < item.first) {
+        all.emplace_back(syllable_id, props);
+        added = true;
+      }
+      for (auto p : item.second)
+        all.emplace_back(item.first, p);
+      if (!added && syllable_id == item.first) {
+        all.emplace_back(syllable_id, props);
+        added = true;
+      }
+    }
+    if (!added)
+      all.emplace_back(syllable_id, props);
+    Reset(all.size());
+    for (const auto& x : all)
+      Append(x.first, x.second);
+  }
+
+ private:
+  // 複製之後（items_ 還指著來源的 props_）：照每個音節的個數重新指到自己的 props_
+  void Rebase() {
+    const EdgeProperties* const* p = props_.data();
+    for (auto& item : items_) {
+      const size_t n = item.second.size();
+      item.second = SpellingPropertiesList(p, p + n);
+      p += n;
+    }
+  }
+
+  vector<value_type> items_;
+  vector<const EdgeProperties*> props_;
+};
+
 using SpellingIndices = map<size_t, SpellingIndex>;
 
 struct SyllableGraph {

@@ -289,12 +289,51 @@ void Syllabifier::CheckOverlappedSpellings(SyllableGraph* graph,
 }
 
 void Syllabifier::Transpose(SyllableGraph* graph) {
+  // 蓬萊：SpellingIndex 是連續的陣列。原本照「終點由大到小、每個終點裡音節由小到大」逐一
+  // index[syll_id].push_back；每個終點的音節本來就排好了，這裡合併這幾串（同一個音節先拿排在前面的終點），
+  // 每個音節的邊順序跟原本相同
+  using Run = pair<SpellingMap::const_iterator, SpellingMap::const_iterator>;
+  vector<Run> runs;
+  vector<pair<SyllableId, const EdgeProperties*>> existing;
   for (const auto& start : graph->edges) {
     auto& index(graph->indices[start.first]);
+    // 圖裡已經有的放前面（原本是接在後面 push_back）；只有同一張圖建兩次才會有
+    existing.clear();
+    for (const auto& x : index)
+      for (auto props : x.second)
+        existing.emplace_back(x.first, props);
+    runs.clear();
+    size_t total = existing.size();
     for (const auto& end : boost::adaptors::reverse(start.second)) {
-      for (const auto& spelling : end.second) {
-        SyllableId syll_id = spelling.first;
-        index[syll_id].push_back(&spelling.second);
+      runs.emplace_back(end.second.begin(), end.second.end());
+      total += end.second.size();
+    }
+    index.Reset(total);
+    size_t e = 0;
+    while (true) {
+      int best = -1;
+      SyllableId best_id = 0;
+      if (e < existing.size()) {
+        best = static_cast<int>(runs.size());
+        best_id = existing[e].first;
+      }
+      for (size_t i = 0; i < runs.size(); ++i) {
+        if (runs[i].first == runs[i].second)
+          continue;
+        // 同一個音節：已經有的、排在前面的終點先（嚴格小於才換）
+        if (best < 0 || runs[i].first->first < best_id) {
+          best = static_cast<int>(i);
+          best_id = runs[i].first->first;
+        }
+      }
+      if (best < 0)
+        break;
+      if (best == static_cast<int>(runs.size())) {
+        index.Append(existing[e].first, existing[e].second);
+        ++e;
+      } else {
+        index.Append(best_id, &runs[best].first->second);
+        ++runs[best].first;
       }
     }
   }

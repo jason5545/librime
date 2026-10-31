@@ -51,6 +51,9 @@ int Syllabifier::BuildSyllableGraph(const string& input,
   size_t farthest = 0;
   VertexQueue queue;
   queue.push(Vertex{0, kNormalSpelling});  // start
+  // 蓬萊：一個拼法的音節先收集在這裡，再放進 SpellingMap（flat_map；見下面）
+  vector<pair<SyllableId, EdgeProperties>> collected;
+  vector<pair<SyllableId, size_t>> order;
 
   while (!queue.empty()) {
     Vertex vertex(queue.top());
@@ -120,6 +123,8 @@ int Syllabifier::BuildSyllableGraph(const string& input,
         // a spelling evaluates to a set of syllables;
         // otherwise, it resembles exactly the syllable itself.
         SpellingAccessor accessor(prism.QuerySpelling(m.value));
+        collected.clear();
+        bool ascending = true;  // 收集到的音節編號由小到大、沒有重複
         while (!accessor.exhausted()) {
           SyllableId syllable_id = accessor.syllable_id();
           EdgeProperties props(accessor.properties());
@@ -136,24 +141,50 @@ int Syllabifier::BuildSyllableGraph(const string& input,
               props.is_correction = true;
               props.credibility = kCorrectionCredibility;
             }
-            // 蓬萊：音節多半照編號由小到大來，比最後一個大就直接接在後面（flat_map）
-            if (spellings.empty() || spellings.rbegin()->first < syllable_id) {
-              spellings.emplace_hint(spellings.end(), syllable_id, props);
-            } else {
-              auto it = spellings.find(syllable_id);
-              if (it == spellings.end()) {
-                spellings.insert({syllable_id, props});
-              } else {
-                it->second.type = (std::min)(it->second.type, props.type);
-              }
-            }
             // let end_vertex_type be the best (smaller) type of spelling
             // that ends at the vertex
             if (end_vertex_type > props.type && !props.is_correction) {
               end_vertex_type = props.type;
             }
+            if (!collected.empty() && collected.back().first >= syllable_id)
+              ascending = false;
+            collected.emplace_back(syllable_id, std::move(props));
           }
           accessor.Next();
+        }
+        // 蓬萊：原本逐一 find／insert（已經有的只把 type 換成比較小的）。拼法的音節清單是部署時拼寫運算
+        // 產生的順序、不一定照編號，flat_map 逐一插在中間會一直搬。這條邊還是空的時候（幾乎都是），
+        // 照（編號, 先後）排好依序接在後面：同一個音節第一個放進去、後面的只更新 type，跟原本相同
+        if (spellings.empty() && ascending) {
+          spellings.reserve(collected.size());
+          for (auto& x : collected)
+            spellings.emplace_hint(spellings.end(), x.first,
+                                   std::move(x.second));
+        } else if (spellings.empty()) {
+          order.clear();
+          for (size_t c = 0; c < collected.size(); ++c)
+            order.emplace_back(collected[c].first, c);
+          std::sort(order.begin(), order.end());
+          spellings.reserve(collected.size());
+          for (const auto& o : order) {
+            auto& x = collected[o.second];
+            if (!spellings.empty() && spellings.rbegin()->first == x.first) {
+              auto& last = spellings.rbegin()->second;
+              last.type = (std::min)(last.type, x.second.type);
+            } else {
+              spellings.emplace_hint(spellings.end(), x.first,
+                                     std::move(x.second));
+            }
+          }
+        } else {
+          for (auto& x : collected) {
+            auto it = spellings.find(x.first);
+            if (it == spellings.end()) {
+              spellings.insert({x.first, std::move(x.second)});
+            } else {
+              it->second.type = (std::min)(it->second.type, x.second.type);
+            }
+          }
         }
         if (spellings.empty()) {
           DLOG(INFO) << "not spelled.";

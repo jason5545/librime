@@ -51,7 +51,41 @@ class Opencc {
     }
   }
 
+  // 蓬萊：同一個字串轉出來的都一樣（詞典載入後不會變），記著；每鍵重新取候選時大多是上一鍵轉過的。
+  // 失敗時呼叫端不看 forms／simplified，只記成不成功。超過上限就整個清掉重記
   bool ConvertWord(const string& text, vector<string>* forms) {
+    auto found = word_cache_.find(text);
+    if (found == word_cache_.end()) {
+      if (word_cache_.size() >= kMaxCached)
+        word_cache_.clear();
+      Converted converted;
+      converted.ok = ConvertWordUncached(text, &converted.forms);
+      found = word_cache_.emplace(text, std::move(converted)).first;
+    }
+    if (found->second.ok)
+      *forms = found->second.forms;
+    return found->second.ok;
+  }
+
+  bool ConvertText(const string& text, string* simplified) {
+    auto found = text_cache_.find(text);
+    if (found == text_cache_.end()) {
+      if (text_cache_.size() >= kMaxCached)
+        text_cache_.clear();
+      Converted converted;
+      string result;
+      converted.ok = ConvertTextUncached(text, &result);
+      if (converted.ok)
+        converted.forms.push_back(std::move(result));
+      found = text_cache_.emplace(text, std::move(converted)).first;
+    }
+    if (found->second.ok)
+      *simplified = found->second.forms.front();
+    return found->second.ok;
+  }
+
+ private:
+  bool ConvertWordUncached(const string& text, vector<string>* forms) {
     Initialize();
     if (converter_ == nullptr) {
       return false;
@@ -116,6 +150,7 @@ class Opencc {
     return forms->size() > 0;
   }
 
+ public:
   bool RandomConvertText(const string& text, string* simplified) {
     Initialize();
     if (dict_ == nullptr)
@@ -149,7 +184,8 @@ class Opencc {
     return *simplified != text;
   }
 
-  bool ConvertText(const string& text, string* simplified) {
+ private:
+  bool ConvertTextUncached(const string& text, string* simplified) {
     Initialize();
     if (converter_ == nullptr)
       return false;
@@ -157,7 +193,14 @@ class Opencc {
     return *simplified != text;
   }
 
- private:
+  struct Converted {
+    bool ok = false;
+    vector<string> forms;  // ConvertWord 的結果；ConvertText 的放在第一個
+  };
+  static constexpr size_t kMaxCached = 512;
+  hash_map<string, Converted> word_cache_;
+  hash_map<string, Converted> text_cache_;
+
   bool initialized_;
   path config_path_;
   opencc::ConverterPtr converter_;

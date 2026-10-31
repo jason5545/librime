@@ -35,26 +35,28 @@ struct DfsState {
   vector<double> quality_len;
   hash_map<int, DictEntryList> query_result;
   an<DbAccessor> accessor;
-  string key;
-  string value;
+  // 蓬萊：目前這一筆，指著 accessor 讀到的那一筆（GetNextRecordRef，不複製）；讀到底時指著空字串
+  const string* key = &kEmpty;
+  const string* value = &kEmpty;
+  static const string kEmpty;
 
   size_t depth() const { return code.size(); }
 
   bool IsExactMatch(const string& prefix) {
     // 蓬萊：同 starts_with(key, prefix + '\t')，不另外配置字串
-    return key.size() > prefix.size() &&
-           key.compare(0, prefix.size(), prefix) == 0 &&
-           key[prefix.size()] == '\t';
+    return key->size() > prefix.size() &&
+           key->compare(0, prefix.size(), prefix) == 0 &&
+           (*key)[prefix.size()] == '\t';
   }
   bool IsPrefixMatch(const string& prefix) {
-    return boost::starts_with(key, prefix);
+    return boost::starts_with(*key, prefix);
   }
   void RecruitEntry(size_t pos,
                     hash_map<string, SyllableId>* syllabary = nullptr);
   bool NextEntry() {
-    if (!accessor->GetNextRecord(&key, &value)) {
-      key.clear();
-      value.clear();
+    if (!accessor->GetNextRecordRef(&key, &value)) {
+      key = &kEmpty;
+      value = &kEmpty;
       return false;  // reached the end
     }
     return true;
@@ -75,11 +77,13 @@ struct DfsState {
   }
 };
 
+const string DfsState::kEmpty;
+
 void DfsState::RecruitEntry(size_t pos,
                             hash_map<string, SyllableId>* syllabary) {
   string full_code;
   auto e = UserDictionary::CreateDictEntry(
-      key, value, present_tick, credibility.back(), quality_len.back(),
+      *key, *value, present_tick, credibility.back(), quality_len.back(),
       syllabary ? &full_code : nullptr);
   if (e) {
     if (syllabary) {
@@ -268,7 +272,7 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
       }
       BOOST_SCOPE_EXIT_END
       DLOG(INFO) << "edge: [" << current_pos << ", " << end_pos << ")";
-      if (prefix != state->key) {  // 'a b c |d ' > 'a b c \tabracadabra'
+      if (prefix != *state->key) {  // 'a b c |d ' > 'a b c \tabracadabra'
         DLOG(INFO) << "forward scanning for '" << prefix << "'.";
         if (!state->ForwardScan(prefix))  // reached the end of db
           continue;

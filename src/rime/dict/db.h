@@ -22,12 +22,23 @@ class DbAccessor {
   virtual bool Reset() = 0;
   virtual bool Jump(const string& key) = 0;
   virtual bool GetNextRecord(string* key, string* value) = 0;
+  // 蓬萊：同 GetNextRecord，只是不複製：*key、*value 指著讀到的那一筆，到下一次讀、Jump、Reset 之前都有效。
+  // 預設複製到 accessor 自己的緩衝區；學習紀錄的記憶體副本（level_db.cc）直接指著副本那一筆
+  virtual bool GetNextRecordRef(const string** key, const string** value) {
+    if (!GetNextRecord(&ref_key_, &ref_value_))
+      return false;
+    *key = &ref_key_;
+    *value = &ref_value_;
+    return true;
+  }
   virtual bool exhausted() = 0;
 
  protected:
   bool MatchesPrefix(const string& key);
 
   string prefix_;
+  string ref_key_;
+  string ref_value_;
 };
 
 class Db : public Class<Db, const string&> {

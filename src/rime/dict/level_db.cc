@@ -162,6 +162,19 @@ class LevelDbMirrorAccessor : public DbAccessor {
     return true;
   }
 
+  // 跟上面一樣的判斷，指著副本那一筆（mirror_ 被改時改的那邊先複製，這一份不會動）
+  bool GetNextRecordRef(const string** key, const string** value) override {
+    const auto& rows = mirror_->rows;
+    if (pos_ >= rows.size() || !key || !value)
+      return false;
+    if (!MatchesPrefix(rows[pos_].first))
+      return false;
+    *key = &rows[pos_].first;
+    *value = &rows[pos_].second;
+    ++pos_;
+    return true;
+  }
+
   bool exhausted() override {
     return pos_ >= mirror_->rows.size() ||
            !MatchesPrefix(mirror_->rows[pos_].first);

@@ -51,7 +51,9 @@ void StringTable::Predict(const string& query, vector<StringId>* result) {
 }
 
 string StringTable::GetString(StringId string_id) {
-  marisa::Agent agent;
+  // 蓬萊：Agent 每個執行緒一個、重複用（每次新建一個都要配置、釋放 State；詞典每出一個詞條取一次文字）。
+  // set_query 會把上一次的 State 清掉，reverse_lookup 的結果跟新建的相同
+  thread_local marisa::Agent agent;
   agent.set_query(string_id);
   try {
     trie_.reverse_lookup(agent);

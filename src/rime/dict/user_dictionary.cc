@@ -130,14 +130,21 @@ bool syllable_less(const string& syllable, const string& other) {
   return static_cast<unsigned char>(syllable[n]) < ' ';
 }
 
-// 蓬萊：[from, to) 裡第一筆 compare_after ≥ 0 的（from 之前的都比較小），從 from 往後指數搜尋
+// 蓬萊：[from, to) 裡第一筆 compare_after ≥ 0 的（from 之前的都比較小），從 from 往後指數搜尋。
+// 找到的那一筆（< to 時）compare_after 的結果放進 *cmp（0：以「音節＋空白」開頭），不用再比一次
 size_t gallop_after(const vector<pair<string, string>>& rows,
                     size_t from,
                     size_t to,
                     size_t base,
-                    const string& syllable) {
-  if (from >= to || compare_after(rows[from].first, base, syllable) >= 0)
+                    const string& syllable,
+                    int* cmp) {
+  if (from >= to)
     return from;
+  const int first = compare_after(rows[from].first, base, syllable);
+  if (first >= 0) {
+    *cmp = first;
+    return from;
+  }
   size_t lo = from + 1;  // lo 之前的都比較小
   size_t step = 1;
   while (true) {
@@ -152,12 +159,16 @@ size_t gallop_after(const vector<pair<string, string>>& rows,
     step <<= 1;
   }
   size_t end = (std::min)(lo + step, to);  // 答案在 [lo, end] 之間（end 可能是 to）
-  return std::partition_point(rows.begin() + lo, rows.begin() + end,
-                              [&](const pair<string, string>& row) {
-                                return compare_after(row.first, base,
-                                                     syllable) < 0;
-                              }) -
-         rows.begin();
+  const size_t found =
+      std::partition_point(rows.begin() + lo, rows.begin() + end,
+                           [&](const pair<string, string>& row) {
+                             return compare_after(row.first, base, syllable) <
+                                    0;
+                           }) -
+      rows.begin();
+  if (found < to)
+    *cmp = compare_after(rows[found].first, base, syllable);
+  return found;
 }
 }  // namespace
 
@@ -396,6 +407,7 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
     }
   };
   const size_t base = current_prefix.size();
+  const bool in_order = filter && SyllablesInOrder();
   size_t cursor = lo;               // 上一個音節的 lower_bound
   const string* last_syllable = nullptr;
   string prefix;
@@ -410,12 +422,15 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
                    << "'.";
         continue;
       }
-      if (last_syllable && syllable_less(syllable, *last_syllable))
+      // 音節編號的順序就是拼法的順序時（SyllablesInOrder）不用每個都比
+      if (!in_order && last_syllable &&
+          syllable_less(syllable, *last_syllable))
         cursor = lo;
       last_syllable = &syllable;
-      cursor = gallop_after(*rows, cursor, hi, base, syllable);
+      int cmp = 1;
+      cursor = gallop_after(*rows, cursor, hi, base, syllable, &cmp);
       const size_t found = cursor;
-      if (found < hi && compare_after((*rows)[found].first, base, syllable) == 0) {
+      if (found < hi && cmp == 0) {
         settle();  // 學習紀錄裡有：照原本的做法處理這個音節
       } else {
         if (!spelling.second.empty()) {  // 沒有邊時原本不 Jump，讀取位置不動
@@ -762,6 +777,31 @@ size_t UserDictionary::data_version() const {
   if (auto level_db = As<LevelDb>(db_))
     return level_db->version();
   return LevelDb::NewVersion();
+}
+
+bool UserDictionary::SyllablesInOrder() {
+  // 蓬萊：編號照詞典音節表的順序給（同 DfsLookup 預測詞時建的 syllabary_）；相鄰兩個都照 ForwardScan 的順序
+  // （「拼法＋空白」）由小到大，DfsLookup 照編號走的音節就是照順序來，不用每次比前一個
+  if (syllables_in_order_ < 0) {
+    syllables_in_order_ = 0;
+    Syllabary syllabary;
+    if (table_ && table_->GetSyllabary(&syllabary)) {
+      bool ok = true;
+      const string* last = nullptr;
+      SyllableId id = 0;
+      for (const auto& s : syllabary) {
+        // 編號真的照這個順序給的才算（GetSyllableById 跟音節表逐一相同）
+        if (table_->GetSyllableById(id++) != s ||
+            (last && !syllable_less(*last, s))) {
+          ok = false;
+          break;
+        }
+        last = &s;
+      }
+      syllables_in_order_ = ok ? 1 : 0;
+    }
+  }
+  return syllables_in_order_ == 1;
 }
 
 const string& UserDictionary::SyllableSpelling(SyllableId syllable_id) {

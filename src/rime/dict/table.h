@@ -9,6 +9,7 @@
 #define RIME_TABLE_H_
 
 #include <cstring>
+#include <algorithm>
 #include <rime/common.h>
 #include <rime/dict/mapped_file.h>
 #include <rime/dict/vocabulary.h>
@@ -101,6 +102,39 @@ struct Metadata {
 
 }  // namespace table
 
+// 蓬萊：查詞典時的碼。索引碼最多 Code::kIndexCodeMaxLength 個音節，TableAccessor、Chunk 一個非聲調鍵
+// 要建幾百個，碼放在物件裡、不另外配置；比這長的（帶 extra_code 的長詞）才放進 vector
+class SmallCode {
+ public:
+  SmallCode() = default;
+  SmallCode(const SyllableId* code, size_t size) { Assign(code, size); }
+  explicit SmallCode(const Code& code) { Assign(code.data(), code.size()); }
+  void Assign(const SyllableId* code, size_t size) {
+    size_ = size;
+    if (size <= kInline) {
+      std::copy(code, code + size, inline_);
+      long_.clear();
+    } else {
+      long_.assign(code, code + size);
+    }
+  }
+  size_t size() const { return size_; }
+  const SyllableId* data() const {
+    return size_ <= kInline ? inline_ : long_.data();
+  }
+  Code ToCode() const {
+    Code code;
+    code.assign(data(), data() + size_);
+    return code;
+  }
+
+ private:
+  static constexpr size_t kInline = Code::kIndexCodeMaxLength;
+  SyllableId inline_[kInline] = {};
+  size_t size_ = 0;
+  vector<SyllableId> long_;
+};
+
 class TableAccessor {
  public:
   TableAccessor() = default;
@@ -108,9 +142,15 @@ class TableAccessor {
                 const List<table::Entry>* entries,
                 double credibility = 0.0,
                 double quality_len = 0.0);
-  // 蓬萊：Table::Query 用，碼直接搬進來不複製
-  TableAccessor(Code&& index_code,
+  // 蓬萊：Table::Query 用，碼是陣列（SmallCode，不配置）
+  TableAccessor(const SyllableId* index_code,
+                size_t index_code_size,
                 const List<table::Entry>* entries,
+                double credibility,
+                double quality_len);
+  TableAccessor(const SyllableId* index_code,
+                size_t index_code_size,
+                const table::TailIndex* code_map,
                 double credibility,
                 double quality_len);
   TableAccessor(const Code& index_code,
@@ -128,15 +168,16 @@ class TableAccessor {
   RIME_DLL size_t remaining() const;
   RIME_DLL const table::Entry* entry() const;
   RIME_DLL const table::Code* extra_code() const;
-  const Code& index_code() const { return index_code_; }
-  // 蓬萊：碼搬出去（lookup_table 放進 Chunk 之後 accessor 就丟掉，不用再複製一份）
-  Code ReleaseIndexCode() { return std::move(index_code_); }
+  // 蓬萊：碼放在 SmallCode 裡，這裡組一份 Code（原本回傳參照）
+  Code index_code() const { return index_code_.ToCode(); }
+  const SmallCode& small_index_code() const { return index_code_; }
+  size_t index_code_size() const { return index_code_.size(); }
   Code code() const;
   double credibility() const { return credibility_; }
   double quality_len() const { return quality_len_; }
 
  private:
-  Code index_code_;
+  SmallCode index_code_;
   const table::Entry* entries_ = nullptr;
   const table::LongEntry* long_entries_ = nullptr;
   size_t size_ = 0;

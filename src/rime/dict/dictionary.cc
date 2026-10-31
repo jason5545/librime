@@ -20,7 +20,7 @@ namespace dictionary {
 
 struct Chunk {
   Table* table = nullptr;
-  Code code;
+  SmallCode code;  // 蓬萊：碼放在物件裡（table.h），索引碼不另外配置
   const table::Entry* entries = nullptr;
   size_t size = 0;
   size_t cursor = 0;
@@ -46,29 +46,18 @@ struct Chunk {
         quality_len(q) {}
   Chunk(Table* t, const TableAccessor& a, double cr = 0.0, double q = 0.0)
       : Chunk(t, a, string(), cr, q) {}
-  // 蓬萊：lookup_table 用，碼從 accessor 搬過來（跟上面那個內容相同，少複製一次）
-  Chunk(Table* t, TableAccessor&& a, double cr, double q)
-      : table(t),
-        entries(a.entry()),
-        size(a.remaining()),
-        cursor(0),
-        matching_code_size(a.index_code().size()),
-        credibility(cr),
-        quality_len(q) {
-    code = a.ReleaseIndexCode();
-  }
   Chunk(Table* t,
         const TableAccessor& a,
         const string& r,
         double cr = 0.0,
         double q = 0.0)
       : table(t),
-        code(a.index_code()),
+        code(a.small_index_code()),
         entries(a.entry()),
         size(a.remaining()),
         cursor(0),
         remaining_code(r),
-        matching_code_size(a.index_code().size()),
+        matching_code_size(a.index_code_size()),
         credibility(cr),
         quality_len(q) {}
 
@@ -172,7 +161,8 @@ an<DictEntry> DictEntryIterator::Peek() {
     DLOG(INFO) << "creating temporary dict entry '"
                << chunk.table->GetEntryText(e) << "'.";
     entry_ = New<DictEntry>();
-    entry_->code = chunk.code;
+    entry_->code.assign(chunk.code.data(),
+                        chunk.code.data() + chunk.code.size());
     entry_->text = chunk.table->GetEntryText(e);
     const double kS = 18.420680743952367;  // log(1e8)
     entry_->weight = e.weight - kS + chunk.credibility;
@@ -273,12 +263,12 @@ static void lookup_table(Table* table,
               watermark);
           if (!match.success)
             continue;
-          size_t matching_code_size = a.index_code().size() + match.depth;
+          size_t matching_code_size = a.index_code_size() + match.depth;
           (*collector)[match.end_pos].AddChunk(
               {table, a.code(), a.entry(), matching_code_size, cr, q});
         } while (a.Next());
       } else {
-        (*collector)[end_pos].AddChunk({table, std::move(a), cr, q});
+        (*collector)[end_pos].AddChunk({table, a, cr, q});
       }
     }
   }

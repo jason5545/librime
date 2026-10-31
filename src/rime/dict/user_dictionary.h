@@ -133,6 +133,7 @@ class UserDictionary : public Class<UserDictionary, const Ticket&> {
   hash_map<SyllableId, string> rev_syllabary_;
   vector<const string*> spelling_by_id_;  // 蓬萊：SyllableSpelling 的快取
   int syllables_in_order_ = -1;           // 蓬萊：SyllablesInOrder 的結果（-1 還沒查）
+  size_t syllable_count_ = 0;             // 蓬萊：SyllablesInOrder 查過的音節數（編號 0 到它減一）
   TickCount tick_ = 0;
   time_t transaction_time_ = 0;
 };

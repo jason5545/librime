@@ -117,17 +117,25 @@ int compare_after(const string& key, size_t base, const string& syllable) {
 
 
 // 蓬萊：syllable＋' ' 是否小於 other＋' '（ForwardScan 的前綴照這個順序）
-bool syllable_less(const string& syllable, const string& other) {
-  const size_t n = (std::min)(syllable.size(), other.size());
-  int c = std::memcmp(syllable.data(), other.data(), n);
+bool syllable_less(const char* syllable,
+                   size_t syllable_size,
+                   const char* other,
+                   size_t other_size) {
+  const size_t n = (std::min)(syllable_size, other_size);
+  int c = std::memcmp(syllable, other, n);
   if (c != 0)
     return c < 0;
-  if (syllable.size() == other.size())
+  if (syllable_size == other_size)
     return false;
   // 短的那個接著是 ' '，跟長的那個的下一個位元組比
-  if (syllable.size() < other.size())
+  if (syllable_size < other_size)
     return ' ' < static_cast<unsigned char>(other[n]);
   return static_cast<unsigned char>(syllable[n]) < ' ';
+}
+
+bool syllable_less(const string& syllable, const string& other) {
+  return syllable_less(syllable.data(), syllable.size(), other.data(),
+                       other.size());
 }
 
 // 蓬萊：[from, to) 裡第一筆 compare_after ≥ 0 的（from 之前的都比較小），從 from 往後指數搜尋。
@@ -271,6 +279,8 @@ UserDictionary::~UserDictionary() {
 void UserDictionary::Attach(const an<Table>& table, const an<Prism>& prism) {
   table_ = table;
   prism_ = prism;
+  syllables_in_order_ = -1;  // 蓬萊：換了詞典要重查（SyllablesInOrder）
+  syllable_count_ = 0;
 }
 
 bool UserDictionary::Load() {
@@ -408,10 +418,19 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
   };
   const size_t base = current_prefix.size();
   const bool in_order = filter && SyllablesInOrder();
+  const SpellingIndex& spellings = index->second;
+  const size_t num_syllables = spellings.size();
+  // 一次跳過一串沒有的音節（下面）：音節編號都在 SyllablesInOrder 查過的範圍裡（拼法都不是空的）才做
+  const bool can_skip = in_order && num_syllables > 0 &&
+                        spellings.begin()->first >= 0 &&
+                        static_cast<size_t>(spellings.rbegin()->first) <
+                            syllable_count_;
   size_t cursor = lo;               // 上一個音節的 lower_bound
   const string* last_syllable = nullptr;
   string prefix;
-  for (const auto& spelling : index->second) {
+  size_t present_index = 0;  // filter 時，學習紀錄裡有的這個音節的落點
+  for (size_t k = 0; k < num_syllables; ++k) {
+    const auto& spelling = *(spellings.begin() + k);
     DLOG(INFO) << "prefix: '" << current_prefix << "'"
                << ", syll_id: " << spelling.first
                << ", num_spellings: " << spelling.second.size();
@@ -432,6 +451,7 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
       const size_t found = cursor;
       if (found < hi && cmp == 0) {
         settle();  // 學習紀錄裡有：照原本的做法處理這個音節
+        present_index = found;
       } else {
         if (!spelling.second.empty()) {  // 沒有邊時原本不 Jump，讀取位置不動
           for (size_t i = 0; i < spelling.second.size(); ++i) {
@@ -452,6 +472,55 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
         if (!in_range) {
           settle();
           return;
+        }
+        // 蓬萊：落點那一筆接在前綴後面的音節 T 比這個音節大（cmp > 0）：照順序接下來比 T 小的音節，
+        // 落點也都是這一筆（前面的都比較小），一樣沒有、一樣只更新水位，讀取位置還是記著這一筆。
+        // 一次跳到第一個不比 T 小的音節，水位照 dfs_reach 補上（前面的音節都處理過了，前綴最大值就是對的）
+        if (can_skip && found < hi && cmp > 0 && k + 1 < num_syllables) {
+          const string& row = (*rows)[found].first;
+          size_t t_end = base;
+          while (t_end < row.size() &&
+                 static_cast<unsigned char>(row[t_end]) > ' ')
+            ++t_end;
+          if (t_end > base && t_end < row.size() && row[t_end] == ' ') {
+            const char* t = row.data() + base;
+            const size_t tn = t_end - base;
+            auto less_t = [&](size_t j) {
+              const string& s = SyllableSpelling((spellings.begin() + j)->first);
+              return syllable_less(s.data(), s.size(), t, tn);
+            };
+            // [k + 1, num_syllables) 裡第一個不比 T 小的，從 k + 1 往後指數搜尋
+            size_t next = k + 1;
+            if (less_t(next)) {
+              size_t lo2 = next + 1;  // lo2 之前的都比 T 小
+              size_t step = 1;
+              size_t end2 = num_syllables;
+              while (true) {
+                size_t probe = lo2 + step - 1;
+                if (probe >= num_syllables)
+                  break;
+                if (!less_t(probe)) {
+                  end2 = probe;
+                  break;
+                }
+                lo2 = probe + 1;
+                step <<= 1;
+              }
+              // 答案在 [lo2, end2] 之間
+              while (lo2 < end2) {
+                size_t mid = lo2 + (end2 - lo2) / 2;
+                if (less_t(mid))
+                  lo2 = mid + 1;
+                else
+                  end2 = mid;
+              }
+              next = lo2;
+              const size_t reach = spellings.dfs_reach(next - 1);
+              if (reach > state->watermark)
+                state->watermark = reach;
+              k = next - 1;  // 迴圈接著 ++k
+            }
+          }
         }
         continue;
       }
@@ -487,8 +556,13 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
       DLOG(INFO) << "edge: [" << current_pos << ", " << end_pos << ")";
       if (prefix != *state->key) {  // 'a b c |d ' > 'a b c \tabracadabra'
         DLOG(INFO) << "forward scanning for '" << prefix << "'.";
-        if (!state->ForwardScan(prefix))  // reached the end of db
+        if (filter) {
+          // 蓬萊：整個陣列裡第一筆 ≥ prefix 的就是落點 present_index（前面的都比較小），
+          // 跟 Jump(prefix) 再讀一筆的結果相同，不用再二分搜尋
+          state->PlaceAfter(present_index);
+        } else if (!state->ForwardScan(prefix)) {  // reached the end of db
           continue;
+        }
       }
       while (state->IsExactMatch(prefix)) {  // 'b |e ' vs. 'b e \tBe'
         DLOG(INFO) << "match found for '" << prefix << "'.";
@@ -790,8 +864,14 @@ bool UserDictionary::SyllablesInOrder() {
       const string* last = nullptr;
       SyllableId id = 0;
       for (const auto& s : syllabary) {
-        // 編號真的照這個順序給的才算（GetSyllableById 跟音節表逐一相同）
-        if (table_->GetSyllableById(id++) != s ||
+        // 編號真的照這個順序給的才算（GetSyllableById 跟音節表逐一相同）；
+        // 拼法不是空的、沒有空白和控制字元（DfsLookup 一次跳過一串音節時，靠這個跟學習紀錄的 key 比）
+        if (s.empty() ||
+            std::any_of(s.begin(), s.end(),
+                        [](char c) {
+                          return static_cast<unsigned char>(c) <= ' ';
+                        }) ||
+            table_->GetSyllableById(id++) != s ||
             (last && !syllable_less(*last, s))) {
           ok = false;
           break;
@@ -799,6 +879,7 @@ bool UserDictionary::SyllablesInOrder() {
         last = &s;
       }
       syllables_in_order_ = ok ? 1 : 0;
+      syllable_count_ = ok ? syllabary.size() : 0;
     }
   }
   return syllables_in_order_ == 1;

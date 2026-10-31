@@ -56,7 +56,13 @@ class SpellingPropertiesList {
 // Transpose 每個頂點配置兩次，不是每個音節一個 map 節點加一個 vector，查詢走訪、find 也不用跟著指標跳
 class SpellingIndex {
  public:
-  using value_type = pair<SyllableId, SpellingPropertiesList>;
+  struct value_type {
+    SyllableId first;
+    SpellingPropertiesList second;
+    // 到這個音節為止（第 0 到這一個）照 UserDictionary::DfsLookup 更新水位的規則（每個音節第一條邊、
+    // 其他不是簡拼的邊）最遠到哪：DfsLookup 一次跳過一串學習紀錄裡沒有的音節時用
+    size_t dfs_reach;
+  };
   using const_iterator = vector<value_type>::const_iterator;
   using const_reverse_iterator = vector<value_type>::const_reverse_iterator;
 
@@ -86,6 +92,7 @@ class SpellingIndex {
         [](const value_type& x, SyllableId id) { return x.first < id; });
     return it != items_.end() && it->first == syllable_id ? it : items_.end();
   }
+  size_t dfs_reach(size_t k) const { return items_[k].dfs_reach; }
   // 沒有這個音節時是空的
   SpellingPropertiesList operator[](SyllableId syllable_id) const {
     auto it = find(syllable_id);
@@ -103,11 +110,18 @@ class SpellingIndex {
   void Append(SyllableId syllable_id, const EdgeProperties* props) {
     props_.push_back(props);
     const EdgeProperties* const* last = props_.data() + props_.size();
-    if (items_.empty() || items_.back().first != syllable_id)
-      items_.emplace_back(syllable_id, SpellingPropertiesList(last - 1, last));
-    else
-      items_.back().second =
-          SpellingPropertiesList(items_.back().second.begin(), last);
+    if (items_.empty() || items_.back().first != syllable_id) {
+      const size_t reach =
+          items_.empty() ? props->end_pos
+                         : (std::max)(items_.back().dfs_reach, props->end_pos);
+      items_.push_back(
+          {syllable_id, SpellingPropertiesList(last - 1, last), reach});
+    } else {
+      auto& item = items_.back();
+      item.second = SpellingPropertiesList(item.second.begin(), last);
+      if (props->type < kAbbreviation && props->end_pos > item.dfs_reach)
+        item.dfs_reach = props->end_pos;
+    }
   }
   // 原本的 index[syllable_id].push_back(props)：接在那個音節的最後面
   void Add(SyllableId syllable_id, const EdgeProperties* props) {

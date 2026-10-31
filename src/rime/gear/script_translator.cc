@@ -215,6 +215,10 @@ class ScriptTranslation : public Translation {
   // 整句、整段剛好的詞照原本的順序先出（第一個候選一定不動）；接著是學習紀錄裡最近打過的詞（recent_）；
   // 再來照原本的順序，只是蓋不住整段、三個音節以上的詞每種長度出到名額就先收著（deferred_），其他都出完才出
   void PickRecentPhrases(UserDictionary* user_dict);
+  // 蓬萊 4D：整段剛好有詞、本來不組整句的短輸入照樣組，決定那一句排第幾（sentence_from_）
+  bool WantShortSentence() const;
+  void PlaceShortSentence(bool has_user_head);
+  size_t sentence_from_ = 0;  // 整句從第幾個候選起出（4D 沒贏時不是 0）
   bool HeadDone() const;
   an<Phrase> MakePhrase(const an<DictEntry>& entry,
                         size_t code_length,
@@ -715,6 +719,14 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
     config->GetInt(name_space_ + "/recent_phrase_max", &recent_phrase_max_);
     config->GetInt(name_space_ + "/recent_phrase_window",
                    &recent_phrase_window_);
+    config->GetInt(name_space_ + "/short_sentence_min", &short_sentence_min_);
+    config->GetInt(name_space_ + "/short_sentence_max", &short_sentence_max_);
+    config->GetDouble(name_space_ + "/short_sentence_penalty",
+                      &short_sentence_penalty_);
+    config->GetInt(name_space_ + "/short_sentence_position",
+                   &short_sentence_position_);
+    config->GetBool(name_space_ + "/short_sentence_full_spelling",
+                    &short_sentence_full_spelling_);
   }
   // 蓬萊：選字時引擎決定選到的詞吃幾個鍵。要比引擎的 OnSelect（照選到的候選切段落）早跑，接在最前面
   if (Config* config = engine_->schema()->config()) {
@@ -1378,6 +1390,16 @@ bool ScriptTranslation::Evaluate(Dictionary* dict, UserDictionary* user_dict) {
   }
   if (translator_->english_lexicon())
     MakeEnglishCandidates(dict, user_dict);
+  // 蓬萊 4D：整段剛好有一個詞的短輸入也組整句（英文判斷之後才組，判斷照原本的讀法比）
+  if (has_at_least_two_syllables && max_sentences_ > 0 && sentences_.empty() &&
+      (has_reliable_phrase || has_reliable_user_phrase) && WantShortSentence()) {
+    if (max_sentences_ > 1)
+      sentences_ = MakeSentences(dict, user_dict);
+    else if (auto sentence = MakeSentence(dict, user_dict))
+      sentences_ = {sentence};
+    if (!sentences_.empty())
+      PlaceShortSentence(has_reliable_user_phrase);
+  }
 
   return !CheckEmpty();
 }
@@ -1526,7 +1548,7 @@ iter_incremented:
     candidate_ = english_late_.front();
     return true;
   }
-  if (!sentences_.empty()) {
+  if (!sentences_.empty() && candidate_index_ >= sentence_from_) {
     candidate_source_ = kSentence;
     candidate_ = sentences_[0];
     return true;
@@ -1630,6 +1652,11 @@ iter_incremented:
                             translator_->initial_quality() +
                             (entry->quality_len / full_code_length));
     return true;
+  } else if (!sentences_.empty()) {
+    // 蓬萊 4D：詞比整句該排的位置少，詞出完了就出整句
+    candidate_source_ = kSentence;
+    candidate_ = sentences_[0];
+    return true;
   } else if (!deferred_.empty()) {
     // 蓬萊：其他詞都出完了，出收著的長詞
     const auto& d = deferred_.front();
@@ -1678,6 +1705,64 @@ void ScriptTranslation::PickRecentPhrases(UserDictionary* user_dict) {
   }
 }
 
+bool ScriptTranslation::WantShortSentence() const {
+  const int lo = translator_->short_sentence_min();
+  const int hi = translator_->short_sentence_max();
+  if (hi <= 0 || hi < lo)
+    return false;
+  const auto& graph = syllabifier_->syllable_graph();
+  const size_t total = graph.interpreted_length;
+  if (total != end_of_input_ - start_)
+    return false;
+  // 整段都是正常拼法（vertices 記到那個位置最好的拼法類型；正常拼法的路走得到結尾時，簡拼的邊已經刪掉了）
+  auto end_type = graph.vertices.find(total);
+  if (!translator_->short_sentence_full_spelling() &&
+      (end_type == graph.vertices.end() || end_type->second < kAbbreviation))
+    return false;
+  // 音節最多的切法有幾個音節
+  map<size_t, int> most;
+  most[0] = 0;
+  for (const auto& start : graph.edges) {
+    auto from = most.find(start.first);
+    if (from == most.end())
+      continue;
+    for (const auto& end : start.second) {
+      int& n = most[end.first];
+      n = (std::max)(n, from->second + 1);
+    }
+  }
+  auto found = most.find(total);
+  return found != most.end() && found->second >= lo && found->second <= hi;
+}
+
+void ScriptTranslation::PlaceShortSentence(bool has_user_head) {
+  // 只留最好的一句；跟本來的第一候選（整段剛好的詞，學習紀錄的優先）同字就不出
+  sentences_.resize(1);
+  const auto& sentence = sentences_.front();
+  an<DictEntry> head;
+  if (has_user_head && user_phrase_ && user_phrase_iter_ != user_phrase_->rend())
+    head = user_phrase_iter_->second.Peek();
+  if (!head && phrase_ && phrase_iter_ != phrase_->rend())
+    head = phrase_iter_->second.Peek();
+  if (!head || head->text == sentence->text()) {
+    sentences_.clear();
+    return;
+  }
+  const string context = translator_->GetPrecedingText(start_);
+  const double head_score = poet_->Evaluate(context, *head, true);
+  if (ScriptTranslation::PreferSplit(head_score, sentence->weight(),
+                                     translator_->short_sentence_penalty())) {
+    sentence_from_ = 0;
+    return;
+  }
+  const int position = translator_->short_sentence_position();
+  if (position <= 0) {
+    sentences_.clear();
+    return;
+  }
+  sentence_from_ = static_cast<size_t>(position - 1);
+}
+
 bool ScriptTranslation::HeadDone() const {
   // 第一個候選照原本的
   if (candidate_index_ == 0)
@@ -1721,7 +1806,7 @@ bool ScriptTranslation::PhrasesExhausted() const {
 bool ScriptTranslation::CheckEmpty() {
   set_exhausted(PhrasesExhausted() && english_.empty() &&
                 english_late_.empty() && deferred_.empty() &&
-                recent_index_ >= recent_.size());
+                recent_index_ >= recent_.size() && sentences_.empty());
   return exhausted();
 }
 

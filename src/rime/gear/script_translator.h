@@ -68,6 +68,12 @@ class ScriptTranslator : public Translator,
   int long_phrase_quota() const { return long_phrase_quota_; }
   int recent_phrase_max() const { return recent_phrase_max_; }
   int recent_phrase_window() const { return recent_phrase_window_; }
+  // 蓬萊：整段剛好有一個詞時，短輸入也組整句（docs/optimization.md 第 4 項第 4 條 4D）
+  int short_sentence_min() const { return short_sentence_min_; }
+  int short_sentence_max() const { return short_sentence_max_; }
+  double short_sentence_penalty() const { return short_sentence_penalty_; }
+  int short_sentence_position() const { return short_sentence_position_; }
+  bool short_sentence_full_spelling() const { return short_sentence_full_spelling_; }
   // 蓬萊：跨按鍵沿用的整句材料（script_translator.cc 的 SentenceCache）。帶上這次查詞用的詞典、學習紀錄，
   // 跟上次不同（讀音變體、隱藏詞清單、學習紀錄寫入）就整個清掉
   SentenceCache* sentence_cache(Dictionary* dict, UserDictionary* user_dict);
@@ -169,6 +175,16 @@ class ScriptTranslator : public Translator,
   int long_phrase_quota_ = 0;
   int recent_phrase_max_ = 0;
   int recent_phrase_window_ = 0;
+  // 蓬萊：整段剛好有一個詞時，短輸入也組整句（docs/optimization.md 第 4 項第 4 條 4D；short_sentence_max 是 0 時照原版）。
+  // 音節最多的切法是 short_sentence_min 到 short_sentence_max 個音節時，照樣組整句，最好的一句跟整段剛好的詞
+  // （本來的第一候選）比分數（ScoreSplit 同一套）：多贏 short_sentence_penalty 以上排第一，不然排第
+  // short_sentence_position 個（0＝不出）。只留最好的一句。short_sentence_full_spelling 是 false 時，
+  // 整段都是正常拼法（只打完整注音）的輸入不組
+  int short_sentence_min_ = 3;
+  int short_sentence_max_ = 0;
+  double short_sentence_penalty_ = 0;
+  int short_sentence_position_ = 2;
+  bool short_sentence_full_spelling_ = false;
 
   int max_homophones_ = 1;
   int spelling_hints_ = 0;

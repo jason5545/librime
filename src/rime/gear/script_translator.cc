@@ -234,6 +234,8 @@ class ScriptSyllabifier : public PhraseSyllabifier {
   bool IsCorrection(const Code& code, size_t code_length) const;
 
   const SyllableGraph& syllable_graph() const { return syllable_graph_; }
+  // 蓬萊：建過幾次圖（ScriptTranslation::MainRow 的備忘照它判斷音節圖換過沒有）
+  size_t build_count() const { return build_count_; }
 
  protected:
   ScriptTranslator* translator_;
@@ -241,6 +243,7 @@ class ScriptSyllabifier : public PhraseSyllabifier {
   size_t start_;
   Syllabifier syllabifier_;
   SyllableGraph syllable_graph_;
+  size_t build_count_ = 0;
 };
 
 // 蓬萊：SentenceCache 每個起點查到的詞（WordGraph 的一列）和查詢讀過的最遠位置（水位）
@@ -289,6 +292,13 @@ class ScriptTranslation : public Translation {
   WordGraph LookupWordGraph(Dictionary* dict,
                             UserDictionary* user_dict,
                             map<int, SentenceCacheRow>* rows);
+  // 蓬萊：主音節圖從 start_pos 查到的一列（學習紀錄、詞典，跟 LookupWordGraph 同一套查法和參數）。這次的圖查過
+  // （或 LookupWordGraph 從快照沿用過）的記在 row_memo_，英文段的最後一段跟主路徑共用；圖重建了就清掉
+  const SentenceCacheRow& MainRow(Dictionary* dict,
+                                  UserDictionary* user_dict,
+                                  size_t start_pos);
+  map<size_t, SentenceCacheRow> row_memo_;
+  size_t row_memo_build_ = 0;
   // 從音節圖的 from 起跑 Poet 到結尾，第一個詞固定成 first（終點 first_end），回傳整句分數；到不了結尾時沒有值。
   // Poet 的 beam 狀態不能沿用快照：固定第一個詞之後，每個位置的狀態都跟沒固定時不同
   std::optional<double> ScoreSplit(const WordGraph& graph,
@@ -609,6 +619,47 @@ size_t first_difference(const SyllableGraph& a, const SyllableGraph& b) {
   if (j != b.edges.end())
     return (std::min)(limit, j->first);
   return limit;
+}
+
+// 蓬萊：b 是從 offset 起到輸入結尾那段自己切的音節圖，a 是整段的。a 在 offset 以後的邊（起點、終點、音節、
+// 每個欄位，位置都平移 offset）跟 b 逐條相同、interpreted_length 也對得上時，從 b 的每個頂點查詞跟從 a 的
+// 對應頂點查詞讀到的一樣（查詞只讀起點以後的 indices，indices 是 edges 轉置來的，和 interpreted_length）
+bool same_suffix_graph(const SyllableGraph& a,
+                       const SyllableGraph& b,
+                       size_t offset) {
+  if (a.interpreted_length != b.interpreted_length + offset ||
+      a.input_length != b.input_length + offset)
+    return false;
+  auto i = a.edges.lower_bound(offset);
+  auto j = b.edges.begin();
+  for (; i != a.edges.end() && j != b.edges.end(); ++i, ++j) {
+    if (i->first != j->first + offset || i->second.size() != j->second.size())
+      return false;
+    for (auto k = i->second.begin(), l = j->second.begin();
+         k != i->second.end(); ++k, ++l) {
+      if (k->first != l->first + offset || k->second.size() != l->second.size())
+        return false;
+      for (auto s = k->second.begin(), t = l->second.begin();
+           s != k->second.end(); ++s, ++t) {
+        const EdgeProperties& e = s->second;
+        const EdgeProperties& f = t->second;
+        if (s->first != t->first || e.type != f.type ||
+            e.end_pos != f.end_pos + offset ||
+            e.credibility != f.credibility || e.tips != f.tips ||
+            e.is_correction != f.is_correction ||
+            e.ambiguous_source_positions.size() !=
+                f.ambiguous_source_positions.size())
+          return false;
+        for (auto u = e.ambiguous_source_positions.begin(),
+                  v = f.ambiguous_source_positions.begin();
+             u != e.ambiguous_source_positions.end(); ++u, ++v) {
+          if (*u != *v + offset)
+            return false;
+        }
+      }
+    }
+  }
+  return i == a.edges.end() && j == b.edges.end();
 }
 
 bool same_entry(const DictEntry& a, const DictEntry& b) {
@@ -1552,6 +1603,7 @@ void ScriptSyllabifier::CountSpellingTypes(const Phrase& phrase,
 }
 
 size_t ScriptSyllabifier::BuildSyllableGraph(Prism& prism) {
+  ++build_count_;
   return (size_t)syllabifier_.BuildSyllableGraph(input_, prism,
                                                  &syllable_graph_);
 }
@@ -2133,12 +2185,40 @@ void ScriptTranslation::EnrollEntries(
   }
 }
 
+const SentenceCacheRow& ScriptTranslation::MainRow(Dictionary* dict,
+                                                   UserDictionary* user_dict,
+                                                   size_t start_pos) {
+  if (row_memo_build_ != syllabifier_->build_count()) {
+    row_memo_.clear();
+    row_memo_build_ = syllabifier_->build_count();
+  }
+  auto found = row_memo_.find(start_pos);
+  if (found != row_memo_.end())
+    return found->second;
+  const auto& syllable_graph = syllabifier_->syllable_graph();
+  map<int, DictEntryList> same_start_pos;
+  size_t watermark = start_pos;
+  if (user_dict) {
+    EnrollEntries(same_start_pos,
+                  user_dict->Lookup(syllable_graph, start_pos,
+                                    translator_->max_user_phrase_syllables(),
+                                    0, 0.0, &watermark));
+  }
+  // merge lookup results
+  EnrollEntries(same_start_pos,
+                dict->Lookup(syllable_graph, start_pos,
+                             &translator_->blacklist(), false, 0.0,
+                             &watermark));
+  auto& row = row_memo_[start_pos];
+  row.entries = New<map<int, DictEntryList>>(std::move(same_start_pos));
+  row.watermark = watermark;
+  return row;
+}
+
 WordGraph ScriptTranslation::LookupWordGraph(
     Dictionary* dict,
     UserDictionary* user_dict,
     map<int, SentenceCacheRow>* rows) {
-  const int kMaxSyllablesForUserPhraseQuery =
-      translator_->max_user_phrase_syllables();
   const auto& syllable_graph = syllabifier_->syllable_graph();
   // 蓬萊：水位比新舊音節圖第一個不同的位置小的起點沿用上一鍵查到的（SentenceCache）
   SentenceCache* cache = translator_->sentence_cache(dict, user_dict);
@@ -2161,23 +2241,18 @@ WordGraph ScriptTranslation::LookupWordGraph(
       same_start_pos = *reusable->entries;
       if (rows)
         (*rows)[x.first] = *reusable;
+      // 蓬萊：沿用的列對這張圖也成立（水位沒碰到不同處），英文段的最後一段也拿得到
+      if (row_memo_build_ != syllabifier_->build_count()) {
+        row_memo_.clear();
+        row_memo_build_ = syllabifier_->build_count();
+      }
+      row_memo_.emplace(x.first, *reusable);
       continue;
     }
-    size_t watermark = x.first;
-    if (user_dict) {
-      EnrollEntries(same_start_pos,
-                    user_dict->Lookup(syllable_graph, x.first,
-                                      kMaxSyllablesForUserPhraseQuery, 0, 0.0,
-                                      &watermark));
-    }
-    // merge lookup results
-    EnrollEntries(same_start_pos,
-                  dict->Lookup(syllable_graph, x.first,
-                               &translator_->blacklist(), false, 0.0,
-                               &watermark));
+    const SentenceCacheRow& row = MainRow(dict, user_dict, x.first);
+    same_start_pos = *row.entries;
     if (rows)
-      (*rows)[x.first] = {New<map<int, DictEntryList>>(same_start_pos),
-                          watermark};
+      (*rows)[x.first] = row;
   }
   return graph;
 }
@@ -2625,7 +2700,18 @@ bool ScriptTranslation::EnrollSegment(
       size_t consumed =
           syllabifier.BuildSyllableGraph(seg, *dict->prism(), &syllable_graph);
       // 整段都要切得開（英文後面緊接聲調鍵時，後段第一鍵就切不開）
-      if (consumed == seg.length()) {
+      // 蓬萊：到輸入結尾的那段，音節圖跟主路徑的音節圖從 seg_start 以後逐條邊相同時，每個頂點查到的跟主音節圖
+      // 從對應頂點查到的一樣（學習紀錄、詞典的查法和參數、EnrollEntries 收的順序跟 LookupWordGraph 相同），
+      // 用 MainRow：主路徑這一鍵查過、沿用過的直接拿，沒查過的查主音節圖、記著（同一鍵幾種英文切法的最後一段、
+      // 之後 4D 組整句都共用）。詞條物件共用，跟快照之間共用一樣。簡拼每按一鍵最後一段都換，原本每種切法都重查
+      if (consumed == seg.length() && is_rear &&
+          same_suffix_graph(syllabifier_->syllable_graph(), syllable_graph,
+                            seg_start)) {
+        part = New<WordGraph>();
+        for (const auto& x : syllable_graph.edges)
+          (*part)[seg_start + x.first] =
+              *MainRow(dict, user_dict, seg_start + x.first).entries;
+      } else if (consumed == seg.length()) {
         part = New<WordGraph>();
         for (const auto& x : syllable_graph.edges) {
           map<int, DictEntryList> by_end_pos;

@@ -32,7 +32,36 @@ struct EdgeProperties : SpellingProperties {
 // 蓬萊：一條邊（起點、終點）上的音節原本是 std::map，簡拼的邊一次 40–90 個，每鍵整張圖重建一次，
 // 每個音節配置、釋放一個節點。改成 flat_map（照音節編號排好的連續陣列，find、走訪、insert、operator[] 一樣）；
 // 建好之後不再增刪（Transpose 指著裡面的 EdgeProperties）
-using SpellingMap = boost::container::flat_map<SyllableId, EdgeProperties>;
+// 蓬萊：flat_map 每條邊一塊連續記憶體，大小是 88 位元組乘上音節數（簡拼的邊 40–90 個），每鍵整張圖重建。
+// 直接跟 malloc 要的話，各種大小散在幾十個級距，洞補不進去，引擎記憶體多 0.5 MB 上下（std::map 的節點全是同一個大小）。
+// 所以 SpellingMap 的儲存從 32 KB 的區塊依序切（EdgeArena）：同一張圖的邊在同幾塊裡，整塊的邊都釋放了才把區塊還回去，
+// malloc 只看到一種大小。只換記憶體從哪裡來，容器的容量、元素、順序都不變
+struct EdgeArena {
+  static void* Allocate(size_t bytes);
+  static void Deallocate(void* p) noexcept;
+};
+
+template <class T>
+struct EdgeArenaAllocator {
+  using value_type = T;
+  EdgeArenaAllocator() noexcept = default;
+  template <class U>
+  EdgeArenaAllocator(const EdgeArenaAllocator<U>&) noexcept {}
+  T* allocate(size_t n) {
+    return static_cast<T*>(EdgeArena::Allocate(n * sizeof(T)));
+  }
+  void deallocate(T* p, size_t) noexcept { EdgeArena::Deallocate(p); }
+  template <class U>
+  bool operator==(const EdgeArenaAllocator<U>&) const noexcept { return true; }
+  template <class U>
+  bool operator!=(const EdgeArenaAllocator<U>&) const noexcept { return false; }
+};
+
+using SpellingMap = boost::container::flat_map<
+    SyllableId,
+    EdgeProperties,
+    std::less<SyllableId>,
+    EdgeArenaAllocator<std::pair<SyllableId, EdgeProperties>>>;
 using VertexMap = map<size_t, SpellingType>;
 using EndVertexMap = map<size_t, SpellingMap>;
 using EdgeMap = map<size_t, EndVertexMap>;

@@ -8,12 +8,84 @@
 #include <algorithm>
 #include <queue>
 #include <boost/range/adaptor/reversed.hpp>
+#include <atomic>
+#include <new>
 #include <rime/algo/syllabifier.h>
 #include <rime/dict/corrector.h>
 #include <rime/dict/prism.h>
 #include "syllabifier.h"
 
 namespace rime {
+
+// 蓬萊：EdgeArena（syllabifier.h）。每個執行緒一塊目前的區塊，依序往後切；每一塊記著還活著的配置數
+//（目前那塊另外算一個），數到 0 就還給 malloc。目前那塊裡的都釋放了，就從頭再切。太大的（超過一塊）直接跟 malloc 要
+namespace {
+constexpr size_t kEdgeChunkSize = 32 * 1024;
+constexpr size_t kEdgeAlign = 16;
+struct EdgeChunk {
+  std::atomic<size_t> live;
+  size_t used;
+};
+struct EdgeBlock {
+  EdgeChunk* chunk;  // nullptr：直接跟 malloc 要的
+  size_t reserved;   // 補到 16 位元組，資料照 16 對齊
+};
+constexpr size_t kEdgeChunkHeader =
+    (sizeof(EdgeChunk) + kEdgeAlign - 1) / kEdgeAlign * kEdgeAlign;
+static_assert(sizeof(EdgeBlock) % kEdgeAlign == 0, "EdgeBlock alignment");
+
+void ReleaseEdgeChunk(EdgeChunk* c) noexcept {
+  if (c->live.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+    c->~EdgeChunk();
+    ::operator delete(c);
+  }
+}
+
+struct EdgeChunkHolder {
+  EdgeChunk* current = nullptr;
+  ~EdgeChunkHolder() {
+    if (current)
+      ReleaseEdgeChunk(current);
+  }
+};
+thread_local EdgeChunkHolder t_edge_chunk;
+}  // namespace
+
+void* EdgeArena::Allocate(size_t bytes) {
+  const size_t need =
+      (sizeof(EdgeBlock) + bytes + kEdgeAlign - 1) / kEdgeAlign * kEdgeAlign;
+  if (need > kEdgeChunkSize - kEdgeChunkHeader) {
+    auto* b = static_cast<EdgeBlock*>(::operator new(need));
+    b->chunk = nullptr;
+    return b + 1;
+  }
+  EdgeChunk*& c = t_edge_chunk.current;
+  if (c && c->live.load(std::memory_order_acquire) == 1)
+    c->used = kEdgeChunkHeader;  // 這塊切出去的都還回來了：從頭再切
+  if (!c || c->used + need > kEdgeChunkSize) {
+    if (c)
+      ReleaseEdgeChunk(c);
+    c = new (::operator new(kEdgeChunkSize)) EdgeChunk;
+    c->live.store(1, std::memory_order_relaxed);
+    c->used = kEdgeChunkHeader;
+  }
+  auto* b = reinterpret_cast<EdgeBlock*>(reinterpret_cast<char*>(c) + c->used);
+  c->used += need;
+  c->live.fetch_add(1, std::memory_order_relaxed);
+  b->chunk = c;
+  return b + 1;
+}
+
+void EdgeArena::Deallocate(void* p) noexcept {
+  if (!p)
+    return;
+  auto* b = static_cast<EdgeBlock*>(p) - 1;
+  if (!b->chunk) {
+    ::operator delete(b);
+    return;
+  }
+  ReleaseEdgeChunk(b->chunk);
+}
 using namespace corrector;
 
 using Vertex = pair<size_t, SpellingType>;

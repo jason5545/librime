@@ -32,7 +32,39 @@ struct EdgeProperties : SpellingProperties {
 // 蓬萊：一條邊（起點、終點）上的音節原本是 std::map，簡拼的邊一次 40–90 個，每鍵整張圖重建一次，
 // 每個音節配置、釋放一個節點。改成 flat_map（照音節編號排好的連續陣列，find、走訪、insert、operator[] 一樣）；
 // 建好之後不再增刪（Transpose 指著裡面的 EdgeProperties）
-using SpellingMap = boost::container::flat_map<SyllableId, EdgeProperties>;
+// 蓬萊：flat_map 每條邊一塊連續記憶體，大小是 88 位元組乘上音節數（簡拼的邊 40–90 個），每鍵整張圖重建，
+// 配置器照大小分級，各種大小散在幾十個級距，每個級距都留著用過的頁（std::map 的節點全是同一個大小）：
+// 引擎記憶體多 0.5 MB 上下。配置的位元組數進位到 2 的次方（256 位元組以下照原本），級距只剩幾個，釋放的塊下一鍵就用得上。
+// 只改向系統要的大小，容器的容量、元素、順序都不變
+template <class T>
+struct RoundedAllocator {
+  using value_type = T;
+  RoundedAllocator() noexcept = default;
+  template <class U>
+  RoundedAllocator(const RoundedAllocator<U>&) noexcept {}
+  static size_t Rounded(size_t bytes) {
+    if (bytes <= 256)
+      return bytes;
+    size_t r = 512;
+    while (r < bytes)
+      r <<= 1;
+    return r;
+  }
+  T* allocate(size_t n) {
+    return static_cast<T*>(::operator new(Rounded(n * sizeof(T))));
+  }
+  void deallocate(T* p, size_t) noexcept { ::operator delete(p); }
+  template <class U>
+  bool operator==(const RoundedAllocator<U>&) const noexcept { return true; }
+  template <class U>
+  bool operator!=(const RoundedAllocator<U>&) const noexcept { return false; }
+};
+
+using SpellingMap =
+    boost::container::flat_map<SyllableId,
+                               EdgeProperties,
+                               std::less<SyllableId>,
+                               RoundedAllocator<std::pair<SyllableId, EdgeProperties>>>;
 using VertexMap = map<size_t, SpellingType>;
 using EndVertexMap = map<size_t, SpellingMap>;
 using EdgeMap = map<size_t, EndVertexMap>;

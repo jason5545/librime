@@ -51,9 +51,11 @@ int Syllabifier::BuildSyllableGraph(const string& input,
   size_t farthest = 0;
   VertexQueue queue;
   queue.push(Vertex{0, kNormalSpelling});  // start
-  // 蓬萊：一個拼法的音節先收集在這裡，再放進 SpellingMap（flat_map；見下面）
-  vector<pair<SyllableId, EdgeProperties>> collected;
-  vector<pair<SyllableId, size_t>> order;
+  // 蓬萊：一個拼法的音節先收集在這裡，再放進 SpellingMap（flat_map；見下面）。每鍵都要建圖，
+  // 暫存陣列每次從小長到大再釋放，各種大小散在配置器的很多級距、留著用過的頁（引擎記憶體多 0.2 MB 上下），
+  // 所以留著重用（只在這個函式裡用、不遞迴）
+  static thread_local vector<pair<SyllableId, EdgeProperties>> collected;
+  static thread_local vector<pair<SyllableId, size_t>> order;
 
   while (!queue.empty()) {
     Vertex vertex(queue.top());
@@ -274,7 +276,9 @@ int Syllabifier::BuildSyllableGraph(const string& input,
       auto& spellings(end_vertices[end_pos]);
       // 蓬萊：最多 512 個鍵、音節順序不一定，flat_map 逐一插入會一直搬。先照原本的順序收集，
       // 照音節編號穩定排序、同一個音節留第一個（原本 insert 已經有的不換），再照順序放進去
-      vector<pair<SyllableId, SpellingProperties>> collected;
+      static thread_local vector<pair<SyllableId, SpellingProperties>> completions;  // 同上，留著重用
+      auto& collected = completions;
+      collected.clear();
       for (const auto& m : keys) {
         if (m.length < code_length)
           continue;

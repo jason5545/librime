@@ -29,6 +29,10 @@ struct SentenceCache;
 class UserDictionary;
 struct SyllableGraph;
 
+// 蓬萊：同一段輸入兩種切法比整句分數時，換成另一種切法要多贏的分數（log 機率）。選字時吃幾個鍵
+// （translator/extend_selection，docs/optimization.md 第 4 項第 6 條）用它；translator/split_penalty 可以改
+constexpr double kSplitPenalty = 0.0;
+
 class ScriptTranslator : public Translator,
                          public Memory,
                          public TranslatorOptions {
@@ -59,6 +63,7 @@ class ScriptTranslator : public Translator,
   int max_word_length() const { return max_word_length_; }
   int core_word_length() const;
   int max_user_phrase_syllables() const { return max_user_phrase_syllables_; }
+  double split_penalty() const { return split_penalty_; }
   // 蓬萊：跨按鍵沿用的整句材料（script_translator.cc 的 SentenceCache）。帶上這次查詞用的詞典、學習紀錄，
   // 跟上次不同（讀音變體、隱藏詞清單、學習紀錄寫入）就整個清掉
   SentenceCache* sentence_cache(Dictionary* dict, UserDictionary* user_dict);
@@ -144,6 +149,15 @@ class ScriptTranslator : public Translator,
   vector<Written> pending_;  // 這次送出寫進學習紀錄的
   connection forget_select_connection_;
   connection forget_commit_connection_;
+  // 蓬萊：選字時引擎決定選到的詞吃幾個鍵（translator/extend_selection）。選到的詞最後一個字的讀音還能往後接
+  // （簡拼的 ㄋ 跟 ㄋㄧ），就兩種吃法各算一次「這個詞＋剩下的最佳整句」，多吃的贏 split_penalty 以上才換。
+  // 比引擎的 OnSelect 早跑（它照選到的候選切段落）。算過幾次、換了幾次記在 context 的 penglai_extend（測試看的）
+  void OnSelectExtend(Context* ctx);
+  bool extend_selection_ = false;
+  double split_penalty_ = kSplitPenalty;
+  int extend_evaluated_ = 0;
+  int extend_taken_ = 0;
+  connection extend_select_connection_;
 
   int max_homophones_ = 1;
   int spelling_hints_ = 0;

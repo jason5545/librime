@@ -25,6 +25,8 @@
 #include <rime/switches.h>
 #include <rime/translation.h>
 #include <limits>
+#include <optional>
+#include <rime/menu.h>
 #include <rime/algo/syllabifier.h>
 #include <rime/dict/corrector.h>
 #include <rime/dict/dictionary.h>
@@ -118,6 +120,12 @@ class ScriptSyllabifier : public PhraseSyllabifier {
   SyllableGraph syllable_graph_;
 };
 
+// 蓬萊：SentenceCache 每個起點查到的詞（WordGraph 的一列）和查詢讀過的最遠位置（水位）
+struct SentenceCacheRow {
+  an<map<int, DictEntryList>> entries;
+  size_t watermark = 0;
+};
+
 class ScriptTranslation : public Translation {
  public:
   ScriptTranslation(ScriptTranslator* translator,
@@ -152,6 +160,33 @@ class ScriptTranslation : public Translation {
       late.insert(c.get());
     return late;
   }
+  // 蓬萊：拆法比較（同一段輸入的兩種切法比整句分數）。選字時吃幾個鍵用；之後別的切法比較也接這三個
+  // 每個起點查詞典、學習紀錄成 WordGraph（音節圖要先建好）。SentenceCache 快照查過、水位沒碰到不同處的列直接沿用
+  // （只讀快照）；rows 不是空的時記下每一列
+  WordGraph LookupWordGraph(Dictionary* dict,
+                            UserDictionary* user_dict,
+                            map<int, SentenceCacheRow>* rows);
+  // 從音節圖的 from 起跑 Poet 到結尾，第一個詞固定成 first（終點 first_end），回傳整句分數；到不了結尾時沒有值。
+  // Poet 的 beam 狀態不能沿用快照：固定第一個詞之後，每個位置的狀態都跟沒固定時不同
+  std::optional<double> ScoreSplit(const WordGraph& graph,
+                                   size_t from,
+                                   const an<DictEntry>& first,
+                                   size_t first_end,
+                                   const string& preceding_text);
+  // 換成 alternative 的條件：有分數，而且比 base 多贏 penalty 以上（base 到不了結尾時有分數就換）
+  static bool PreferSplit(std::optional<double> base,
+                          std::optional<double> alternative,
+                          double penalty) {
+    return alternative && (!base || *alternative > *base + penalty);
+  }
+  // 選字時決定 selected 吃幾個鍵（這份翻譯的輸入從 selected 的起點到整段輸入的結尾）：selected 最後一個詞
+  // 在同一個起點有同樣文字、吃更多鍵的詞條時，兩種吃法各算 ScoreSplit，多吃的贏了就回傳換過的候選。
+  // evaluated：有沒有走到比較
+  an<Phrase> ExtendSelected(Dictionary* dict,
+                            UserDictionary* user_dict,
+                            const an<Phrase>& selected,
+                            const string& preceding_text,
+                            bool* evaluated);
 
  protected:
   bool CheckEmpty();
@@ -334,10 +369,7 @@ struct SentenceCache {
              user_version == o.user_version;
     }
   };
-  struct Row {
-    an<map<int, DictEntryList>> entries;
-    size_t watermark = 0;
-  };
+  using Row = SentenceCacheRow;
   // 英文段：起點、終點、那段輸入、是不是最後一段（EnrollSegment）
   using SegmentKey = std::tuple<size_t, size_t, string, bool>;
 
@@ -656,6 +688,16 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
           [this](Context* ctx) { OnSelectForForget(ctx); });
     }
   }
+  // 蓬萊：選字時引擎決定選到的詞吃幾個鍵。要比引擎的 OnSelect（照選到的候選切段落）早跑，接在最前面
+  if (Config* config = engine_->schema()->config()) {
+    config->GetBool(name_space_ + "/extend_selection", &extend_selection_);
+    config->GetDouble(name_space_ + "/split_penalty", &split_penalty_);
+    if (extend_selection_ && dict_) {
+      extend_select_connection_ = engine_->context()->select_notifier().connect(
+          [this](Context* ctx) { OnSelectExtend(ctx); },
+          boost::signals2::at_front);
+    }
+  }
   // 蓬萊：詞典的變體表（Dictionary::SelectVariant）跟著方案選項切換：方案 switches 裡有選項的名稱
   // 剛好是變體名稱（詞典檔的 weight@<名稱> 欄）時，那個選項打開就查那張表；都沒打開就是主表
   if (Config* config = engine_->schema()->config()) {
@@ -688,6 +730,7 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
 }
 
 ScriptTranslator::~ScriptTranslator() {
+  extend_select_connection_.disconnect();
   forget_select_connection_.disconnect();
   forget_commit_connection_.disconnect();
   if (engine_ && raw_input_format_ &&
@@ -981,6 +1024,57 @@ bool ScriptTranslator::ForgetSelected(Context* ctx) const {
       return true;
   }
   return false;
+}
+
+void ScriptTranslator::OnSelectExtend(Context* ctx) {
+  Composition& comp = ctx->composition();
+  if (comp.empty() || !dict_ || !dict_->loaded())
+    return;
+  Segment& seg = comp.back();
+  auto cand = seg.GetSelectedCandidate();
+  auto phrase = As<Phrase>(Candidate::GetGenuineCandidate(cand));
+  if (!phrase || !Language::intelligible(phrase, this))
+    return;
+  const string& type = phrase->type();
+  if (type != "phrase" && type != "user_phrase" && type != "sentence")
+    return;
+  const string& input = ctx->input();
+  if (phrase->start() != seg.start || phrase->end() >= input.length())
+    return;
+  const string rest = input.substr(phrase->start());
+  bool enable_user_dict =
+      user_dict_ && user_dict_->loaded() && !IsUserDictDisabledFor(rest);
+  auto translation = New<ScriptTranslation>(
+      this, corrector_.get(), poet_.get(), rest, phrase->start(),
+      input.length(), max_sentences_, sentence_cutoff_threshold_);
+  bool evaluated = false;
+  auto extended = translation->ExtendSelected(
+      dict_.get(), enable_user_dict ? user_dict_.get() : nullptr, phrase,
+      GetPrecedingText(seg.start), &evaluated);
+  if (!evaluated)
+    return;
+  ++extend_evaluated_;
+  if (extended) {
+    ++extend_taken_;
+    // 濾鏡換過字形（臺灣字形）的照樣顯示、送出換過的字
+    an<Candidate> replacement = extended;
+    if (cand != phrase)
+      replacement = New<ShadowCandidate>(extended, cand->type(), cand->text(),
+                                         cand->comment());
+    auto menu = New<Menu>();
+    menu->AddTranslation(New<UniqueTranslation>(replacement));
+    seg.menu = menu;
+    seg.selected_index = 0;
+    // 吃到段落後面（游標後）的鍵：段落跟著變長。組字區的輸入原本只到游標，先換成整段（原本的是它的前綴，
+    // 不會丟掉任何段落），不然引擎接著重新組字時會把超出去的這段丟掉。原本的長度（length）不動，退格打開時照舊重新組字
+    if (replacement->end() > seg.end) {
+      if (comp.input().length() < replacement->end())
+        comp.Reset(input);
+      seg.end = replacement->end();
+    }
+  }
+  ctx->set_property("penglai_extend", std::to_string(extend_evaluated_) + " " +
+                                          std::to_string(extend_taken_));
 }
 
 void ScriptTranslator::OnSelectForForget(Context* ctx) {
@@ -1491,9 +1585,10 @@ void ScriptTranslation::EnrollEntries(
   }
 }
 
-WordGraph ScriptTranslation::PrepareForMakingSentence(
+WordGraph ScriptTranslation::LookupWordGraph(
     Dictionary* dict,
-    UserDictionary* user_dict) {
+    UserDictionary* user_dict,
+    map<int, SentenceCacheRow>* rows) {
   const int kMaxSyllablesForUserPhraseQuery =
       translator_->max_user_phrase_syllables();
   const auto& syllable_graph = syllabifier_->syllable_graph();
@@ -1504,7 +1599,6 @@ WordGraph ScriptTranslation::PrepareForMakingSentence(
     diverge.push_back(first_difference(
         snapshot.syllabifier->syllable_graph(), syllable_graph));
   }
-  map<int, SentenceCache::Row> rows;
   WordGraph graph;
   for (const auto& x : syllable_graph.edges) {
     auto& same_start_pos = graph[x.first];
@@ -1517,7 +1611,8 @@ WordGraph ScriptTranslation::PrepareForMakingSentence(
     }
     if (reusable) {
       same_start_pos = *reusable->entries;
-      rows[x.first] = *reusable;
+      if (rows)
+        (*rows)[x.first] = *reusable;
       continue;
     }
     size_t watermark = x.first;
@@ -1532,8 +1627,19 @@ WordGraph ScriptTranslation::PrepareForMakingSentence(
                   dict->Lookup(syllable_graph, x.first,
                                &translator_->blacklist(), false, 0.0,
                                &watermark));
-    rows[x.first] = {New<map<int, DictEntryList>>(same_start_pos), watermark};
+    if (rows)
+      (*rows)[x.first] = {New<map<int, DictEntryList>>(same_start_pos),
+                          watermark};
   }
+  return graph;
+}
+
+WordGraph ScriptTranslation::PrepareForMakingSentence(
+    Dictionary* dict,
+    UserDictionary* user_dict) {
+  map<int, SentenceCache::Row> rows;
+  WordGraph graph = LookupWordGraph(dict, user_dict, &rows);
+  SentenceCache* cache = translator_->sentence_cache(dict, user_dict);
   // Poet：在還留著 beam 狀態的快照裡，挑詞條相同的範圍最長的那份。位置 q 的 beam 狀態只看終點 ≤ q 的詞條
   // （起點都 < q），所以終點 ≤ R 的每一格詞條逐欄位都相同時，狀態沿用到 R（R 也不能是上次或這次的結尾，
   // 在 MakeSentences 裡再限）。這幾格換成那份快照的同一批物件：沿用的狀態指著它們，物件要跟著這次的快照活著
@@ -1645,6 +1751,143 @@ an<Sentence> ScriptTranslation::MakeSentence(Dictionary* dict,
     return sentence;
   }
   return nullptr;
+}
+
+std::optional<double> ScriptTranslation::ScoreSplit(
+    const WordGraph& graph,
+    size_t from,
+    const an<DictEntry>& first,
+    size_t first_end,
+    const string& preceding_text) {
+  const size_t total = syllabifier_->syllable_graph().interpreted_length;
+  if (!first || first_end <= from || first_end > total)
+    return std::nullopt;
+  // 第一個詞就到結尾：Poet 不出只有一個詞的整句，照同一套分數直接算
+  if (first_end == total)
+    return poet_->Evaluate(preceding_text, *first, true);
+  WordGraph forced;
+  forced[0][first_end - from].push_back(first);
+  for (auto it = graph.lower_bound(first_end); it != graph.end(); ++it) {
+    auto& row = forced[it->first - from];
+    for (const auto& ev : it->second)
+      row[ev.first - from] = ev.second;
+  }
+  // 跟這段輸入出整句時同一個做法（整句候選數一樣，beam 寬度才一樣）
+  if (max_sentences_ > 1) {
+    auto sentences =
+        poet_->MakeSentences(forced, total - from, preceding_text,
+                             max_sentences_, sentence_cutoff_threshold_);
+    if (sentences.empty())
+      return std::nullopt;
+    return sentences.front()->weight();
+  }
+  if (auto sentence = poet_->MakeSentence(forced, total - from, preceding_text))
+    return sentence->weight();
+  return std::nullopt;
+}
+
+an<Phrase> ScriptTranslation::ExtendSelected(Dictionary* dict,
+                                             UserDictionary* user_dict,
+                                             const an<Phrase>& selected,
+                                             const string& preceding_text,
+                                             bool* evaluated) {
+  *evaluated = false;
+  if (!dict || !dict->prism() || selected->start() != start_)
+    return nullptr;
+  // 最後一個詞：整句是最後一個成分（前面的詞兩種吃法都一樣，當成前文）；詞就是它自己
+  auto sentence = As<Sentence>(selected);
+  const DictEntry* last = &selected->entry();
+  size_t last_start = selected->start();
+  string context = preceding_text;
+  if (sentence) {
+    const auto& components = sentence->components();
+    if (components.empty())
+      return nullptr;
+    last = &components.back();
+    last_start = selected->end() - sentence->word_lengths().back();
+    for (size_t i = 0; i + 1 < components.size(); ++i)
+      context += components[i].text;
+  }
+  if (last->code.empty() || last->text.empty())
+    return nullptr;
+  syllabifier_->BuildSyllableGraph(*dict->prism());
+  const auto& graph = syllabifier_->syllable_graph();
+  const size_t from = last_start - start_;
+  const size_t end = selected->end() - start_;
+  if (graph.edges.find(from) == graph.edges.end())
+    return nullptr;
+  // 同一個起點、同樣文字的詞條，每個終點留分數最高的（學習紀錄的也算，記著是哪邊的）
+  map<size_t, pair<an<DictEntry>, bool>> same;
+  auto keep = [&](size_t end_pos, const an<DictEntry>& e, bool user) {
+    if (!e || e->text != last->text || e->IsPredictiveMatch())
+      return;
+    auto& slot = same[end_pos];
+    if (!slot.first || e->weight > slot.first->weight)
+      slot = {e, user};
+  };
+  if (user_dict) {
+    if (auto found = user_dict->Lookup(graph, from)) {
+      for (auto& y : *found) {
+        for (auto& it = y.second; !it.exhausted();) {
+          keep(y.first, it.Peek(), true);
+          if (!it.Next())
+            break;
+        }
+      }
+    }
+  }
+  if (auto found = dict->Lookup(graph, from, &translator_->blacklist())) {
+    for (auto& y : *found) {
+      for (auto& it = y.second; !it.exhausted();) {
+        keep(y.first, it.Peek(), false);
+        if (!it.Next())
+          break;
+      }
+    }
+  }
+  if (same.upper_bound(end) == same.end())
+    return nullptr;
+  *evaluated = true;
+  WordGraph words = LookupWordGraph(dict, user_dict, nullptr);
+  // 現在的吃法：同一份圖查到的詞條（分數跟多吃的同一套算法）；查不到時用選到的那個
+  auto base = same.find(end);
+  an<DictEntry> base_entry =
+      base != same.end() ? base->second.first : New<DictEntry>(*last);
+  auto base_score = ScoreSplit(words, from, base_entry, end, context);
+  std::optional<double> best_score;
+  size_t best_end = 0;
+  pair<an<DictEntry>, bool> best;
+  for (auto it = same.upper_bound(end); it != same.end(); ++it) {
+    auto score = ScoreSplit(words, from, it->second.first, it->first, context);
+    if (score && (!best_score || *score > *best_score)) {
+      best_score = score;
+      best_end = it->first;
+      best = it->second;
+    }
+  }
+  if (!PreferSplit(base_score, best_score, translator_->split_penalty()))
+    return nullptr;
+  an<Phrase> result;
+  if (sentence) {
+    auto extended = New<Sentence>(translator_->language());
+    const auto& components = sentence->components();
+    const auto& lengths = sentence->word_lengths();
+    size_t pos = 0;
+    for (size_t i = 0; i + 1 < components.size(); ++i) {
+      pos += lengths[i];
+      extended->Extend(components[i], pos, components[i].weight);
+    }
+    extended->Extend(*best.first, best_end, *best_score);
+    extended->Offset(start_);
+    result = extended;
+  } else {
+    result = New<Phrase>(translator_->language(),
+                         best.second ? "user_phrase" : "phrase", start_,
+                         start_ + best_end, best.first);
+  }
+  result->set_syllabifier(syllabifier_);
+  result->set_preedit(syllabifier_->GetPreeditString(*result));
+  return result;
 }
 
 // 蓬萊：英文單字進整句

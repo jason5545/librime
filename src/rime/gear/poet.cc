@@ -85,6 +85,13 @@ Poet::Poet(const Language* language, Config* config, Compare compare)
 
 Poet::~Poet() {}
 
+double Poet::Evaluate(const string& context,
+                      const DictEntry& entry,
+                      bool is_rear) const {
+  return Grammar::Evaluate(context, entry.text, entry.weight, is_rear,
+                           grammar_.get());
+}
+
 bool Poet::CompareWeight(const Line& one, const Line& other) {
   return one.weight < other.weight;
 }

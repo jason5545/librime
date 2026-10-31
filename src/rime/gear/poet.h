@@ -59,6 +59,9 @@ class Poet {
                                     PoetStates* states,
                                     int reuse_upto);
 
+  // 蓬萊：一個詞接在 context 後面的分數，跟組句時同一套（詞條權重加語言模型）。整句只有一個詞時用
+  double Evaluate(const string& context, const DictEntry& entry, bool is_rear) const;
+
   template <class TranslatorT>
   an<Translation> ContextualWeighted(an<Translation> translation,
                                      const string& input,

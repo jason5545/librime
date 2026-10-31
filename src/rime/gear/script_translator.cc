@@ -430,6 +430,83 @@ size_t first_difference(const SyllableGraph& a, const SyllableGraph& b) {
   return limit;
 }
 
+bool same_entry(const DictEntry& a, const DictEntry& b) {
+  return a.text == b.text && a.comment == b.comment && a.preedit == b.preedit &&
+         a.code == b.code && a.custom_code == b.custom_code &&
+         a.weight == b.weight && a.quality_len == b.quality_len &&
+         a.commit_count == b.commit_count &&
+         a.remaining_code_length == b.remaining_code_length &&
+         a.matching_code_size == b.matching_code_size;
+}
+
+bool same_entries(const DictEntryList& a, const DictEntryList& b) {
+  if (a.size() != b.size())
+    return false;
+  for (size_t i = 0; i < a.size(); ++i) {
+    if (a[i] != b[i] && !same_entry(*a[i], *b[i]))
+      return false;
+  }
+  return true;
+}
+
+// 兩份 rows（起點 → 終點 → 詞條）裡，終點 ≤ R 的每一格（有沒有這一格、詞條逐欄位）都相同的最大 R
+int same_entries_upto(const map<int, SentenceCache::Row>& a,
+                      const map<int, SentenceCache::Row>& b) {
+  int first_diff = (std::numeric_limits<int>::max)();
+  auto diff_at = [&](int end_pos) {
+    if (end_pos < first_diff)
+      first_diff = end_pos;
+  };
+  auto i = a.begin();
+  auto j = b.begin();
+  while (i != a.end() || j != b.end()) {
+    if (j == b.end() || (i != a.end() && i->first < j->first)) {
+      if (i->first >= first_diff)
+        break;
+      if (!i->second.entries->empty())
+        diff_at(i->second.entries->begin()->first);
+      ++i;
+    } else if (i == a.end() || j->first < i->first) {
+      if (j->first >= first_diff)
+        break;
+      if (!j->second.entries->empty())
+        diff_at(j->second.entries->begin()->first);
+      ++j;
+    } else {
+      if (i->first >= first_diff)
+        break;
+      if (i->second.entries != j->second.entries) {
+        const auto& x = *i->second.entries;
+        const auto& y = *j->second.entries;
+        auto k = x.begin();
+        auto l = y.begin();
+        while ((k != x.end() || l != y.end())) {
+          if (l == y.end() || (k != x.end() && k->first < l->first)) {
+            diff_at(k->first);
+            break;
+          }
+          if (k == x.end() || l->first < k->first) {
+            diff_at(l->first);
+            break;
+          }
+          if (k->first >= first_diff)
+            break;
+          if (!same_entries(k->second, l->second)) {
+            diff_at(k->first);
+            break;
+          }
+          ++k;
+          ++l;
+        }
+      }
+      ++i;
+      ++j;
+    }
+  }
+  return first_diff == (std::numeric_limits<int>::max)() ? first_diff
+                                                         : first_diff - 1;
+}
+
 }  // namespace
 
 // ScriptTranslator implementation
@@ -1457,41 +1534,53 @@ WordGraph ScriptTranslation::PrepareForMakingSentence(
                                &watermark));
     rows[x.first] = {New<map<int, DictEntryList>>(same_start_pos), watermark};
   }
-  // Poet：在還留著 beam 狀態的快照裡，挑第一個詞條不同的起點最後面的那份；狀態沿用到那個起點
-  // （同一批詞條＝同一個物件。終點的條件在 MakeSentences 裡再加）
+  // Poet：在還留著 beam 狀態的快照裡，挑詞條相同的範圍最長的那份。位置 q 的 beam 狀態只看終點 ≤ q 的詞條
+  // （起點都 < q），所以終點 ≤ R 的每一格詞條逐欄位都相同時，狀態沿用到 R（R 也不能是上次或這次的結尾，
+  // 在 MakeSentences 裡再限）。這幾格換成那份快照的同一批物件：沿用的狀態指著它們，物件要跟著這次的快照活著
   cache->poet_source.reset();
   cache->poet_reuse = -1;
   int best = 0;  // 沿用不到任何位置的不拿（拿走了那份快照就沒有 beam 狀態了）
+  SentenceCache::Snapshot* source = nullptr;
   for (auto& snapshot : cache->snapshots) {
     if (!snapshot.poet)
       continue;
-    int first_changed = (std::numeric_limits<int>::max)();
-    for (const auto& r : rows) {
-      auto found = snapshot.rows.find(r.first);
-      if (found == snapshot.rows.end() ||
-          found->second.entries != r.second.entries) {
-        first_changed = r.first;
-        break;
-      }
-    }
-    for (const auto& r : snapshot.rows) {
-      if (r.first >= first_changed)
-        break;
-      if (!rows.count(r.first)) {
-        first_changed = r.first;
-        break;
-      }
-    }
-    if (first_changed > best) {
-      best = first_changed;
-      cache->poet_source = snapshot.poet;
-      cache->poet_reuse = first_changed;
-      cache->poet_context = snapshot.poet_context;
-      cache->poet_count = snapshot.poet_count;
-      cache->poet_total = snapshot.poet_total;
+    int same_upto = same_entries_upto(snapshot.rows, rows);
+    if (same_upto > best) {
+      best = same_upto;
+      source = &snapshot;
     }
   }
-  if (cache->poet_source) {  // 拿走：接著算會改到它，原本那份快照不能再拿來沿用 beam 狀態
+  if (source) {
+    cache->poet_source = source->poet;
+    cache->poet_reuse = best;
+    cache->poet_context = source->poet_context;
+    cache->poet_count = source->poet_count;
+    cache->poet_total = source->poet_total;
+    for (auto& r : rows) {
+      if (r.first >= best)
+        break;
+      auto found = source->rows.find(r.first);
+      if (found == source->rows.end() ||
+          found->second.entries == r.second.entries)
+        continue;
+      an<map<int, DictEntryList>> shared;
+      for (const auto& y : *found->second.entries) {
+        if (y.first > best)
+          break;
+        const auto& mine = r.second.entries->at(y.first);
+        if (mine.size() == y.second.size() &&
+            std::equal(mine.begin(), mine.end(), y.second.begin()))
+          continue;
+        if (!shared)
+          shared = New<map<int, DictEntryList>>(*r.second.entries);
+        (*shared)[y.first] = y.second;
+      }
+      if (shared) {
+        r.second.entries = shared;
+        graph[r.first] = *shared;
+      }
+    }
+    // 拿走：接著算會改到它，原本那份快照不能再拿來沿用 beam 狀態
     for (auto& snapshot : cache->snapshots) {
       if (snapshot.poet == cache->poet_source)
         snapshot.poet.reset();

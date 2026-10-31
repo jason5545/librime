@@ -31,13 +31,25 @@ TableAccessor::TableAccessor(const Code& index_code,
       credibility_(credibility),
       quality_len_(quality_len) {}
 
-TableAccessor::TableAccessor(Code&& index_code,
+TableAccessor::TableAccessor(const SyllableId* index_code,
+                             size_t index_code_size,
                              const List<table::Entry>* list,
                              double credibility,
                              double quality_len)
-    : index_code_(std::move(index_code)),
+    : index_code_(index_code, index_code_size),
       entries_(list->at.get()),
       size_(list->size),
+      credibility_(credibility),
+      quality_len_(quality_len) {}
+
+TableAccessor::TableAccessor(const SyllableId* index_code,
+                             size_t index_code_size,
+                             const table::TailIndex* code_map,
+                             double credibility,
+                             double quality_len)
+    : index_code_(index_code, index_code_size),
+      long_entries_(code_map->at),
+      size_(code_map->size),
       credibility_(credibility),
       quality_len_(quality_len) {}
 
@@ -592,13 +604,13 @@ struct QueryState {
   table::TrunkIndex* lv3;
   table::TailIndex* lv4;
 
-  Code MakeCode(SyllableId last) const {
-    Code c;
-    c.reserve(level + 1);
-    c.assign(code, code + level);
-    if (last >= 0)
-      c.push_back(last);
-    return c;
+  // 碼放進 out（最多 kIndexCodeMaxLength 個），回傳長度：前 level 個，last ≥ 0 時再接上它
+  size_t MakeCode(SyllableId last, SyllableId* out) const {
+    std::copy(code, code + level, out);
+    if (last < 0)
+      return level;
+    out[level] = last;
+    return level + 1;
   }
 };
 
@@ -629,9 +641,11 @@ bool Table::Query(const SyllableGraph& syll_graph,
     if (query.level == Code::kIndexCodeMaxLength) {
       // TableQuery::Access(-1)
       if (query.lv4 && query.lv4->size) {
-        (*result)[current_pos].push_back(TableAccessor(
-            query.MakeCode(-1), query.lv4, 0 + query.credibility,
-            0 + query.quality_len));
+        SyllableId code[Code::kIndexCodeMaxLength];
+        const size_t n = query.MakeCode(-1, code);
+        (*result)[current_pos].push_back(
+            TableAccessor(code, n, query.lv4, 0 + query.credibility,
+                          0 + query.quality_len));
       }
       continue;
     }
@@ -655,9 +669,10 @@ bool Table::Query(const SyllableGraph& syll_graph,
         double delta_quality_len =
             (is_normal_spelling ? 1.0 : 0.0) * (end_pos - current_pos);
         if (has_entries) {
+          SyllableId code[Code::kIndexCodeMaxLength];
+          const size_t n = query.MakeCode(syll_id, code);
           (*result)[end_pos].push_back(TableAccessor(
-              query.MakeCode(syll_id), entries,
-              next_credibility + query.credibility,
+              code, n, entries, next_credibility + query.credibility,
               delta_quality_len + query.quality_len));
         }
         if (end_pos < syll_graph.interpreted_length && can_advance) {

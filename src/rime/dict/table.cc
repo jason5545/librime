@@ -613,7 +613,9 @@ bool Table::Query(const SyllableGraph& syll_graph,
   result->clear();
   // 蓬萊：結果跟原本照 TableQuery 一步一步走的相同（同樣的順序推進佇列、同樣的順序收結果）。
   // 每個音節只找一次節點，Access 和 Walk 共用；沒有詞的節點不建 TableAccessor
-  vector<QueryState> q;
+  // 佇列每次清空重用（同一個執行緒不會同時跑兩個 Query），不用每次重新配置、長大
+  thread_local vector<QueryState> q;
+  q.clear();
   q.push_back({start_pos, 0, {}, 0, 0, nullptr, nullptr, nullptr});
   for (size_t head = 0; head < q.size(); ++head) {
     const QueryState query = q[head];

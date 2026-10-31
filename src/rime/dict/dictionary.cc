@@ -46,6 +46,17 @@ struct Chunk {
         quality_len(q) {}
   Chunk(Table* t, const TableAccessor& a, double cr = 0.0, double q = 0.0)
       : Chunk(t, a, string(), cr, q) {}
+  // 蓬萊：lookup_table 用，碼從 accessor 搬過來（跟上面那個內容相同，少複製一次）
+  Chunk(Table* t, TableAccessor&& a, double cr, double q)
+      : table(t),
+        entries(a.entry()),
+        size(a.remaining()),
+        cursor(0),
+        matching_code_size(a.index_code().size()),
+        credibility(cr),
+        quality_len(q) {
+    code = a.ReleaseIndexCode();
+  }
   Chunk(Table* t,
         const TableAccessor& a,
         const string& r,
@@ -267,7 +278,7 @@ static void lookup_table(Table* table,
               {table, a.code(), a.entry(), matching_code_size, cr, q});
         } while (a.Next());
       } else {
-        (*collector)[end_pos].AddChunk({table, a, cr, q});
+        (*collector)[end_pos].AddChunk({table, std::move(a), cr, q});
       }
     }
   }

@@ -129,6 +129,8 @@ class TableAccessor {
   RIME_DLL const table::Entry* entry() const;
   RIME_DLL const table::Code* extra_code() const;
   const Code& index_code() const { return index_code_; }
+  // 蓬萊：碼搬出去（lookup_table 放進 Chunk 之後 accessor 就丟掉，不用再複製一份）
+  Code ReleaseIndexCode() { return std::move(index_code_); }
   Code code() const;
   double credibility() const { return credibility_; }
   double quality_len() const { return quality_len_; }

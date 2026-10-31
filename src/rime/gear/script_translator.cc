@@ -1054,6 +1054,7 @@ void ScriptTranslator::OnSelectExtend(Context* ctx) {
   if (!evaluated)
     return;
   ++extend_evaluated_;
+  seg.tags.insert(kCutHintTag);
   if (extended) {
     ++extend_taken_;
     // 濾鏡換過字形（臺灣字形）的照樣顯示、送出換過的字

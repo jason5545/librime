@@ -15,6 +15,9 @@ namespace rime {
 class Candidate;
 class Menu;
 
+// 蓬萊：選字時有兩種吃法（translator/extend_selection 比過）的段落。組字區在這個字後面標出它吃掉的注音
+static const char kCutHintTag[] = "cut_hint";
+
 struct Segment {
   enum Status {
     kVoid,

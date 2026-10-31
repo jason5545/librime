@@ -53,6 +53,17 @@ Preedit Composition::GetPreedit(const string& full_input,
       if (cand) {
         end = cand->end();
         preedit.text += cand->text();
+        // 蓬萊：最近一次選的段落有兩種吃法時，字後面接最後一個音節吃掉的注音和一個空白，猜錯當下看得到
+        // （兩種吃法只差在最後一個音節吃多少；候選的 preedit 是格式化過的注音，音節之間是空白）。
+        // 前端（貂毫 patches/squirrel/0026）把反白段落前面的注音畫成註解的顏色、小一號
+        if (i + 2 == size() && at(i).HasTag(kCutHintTag) &&
+            !cand->preedit().empty()) {
+          const string& spelled = cand->preedit();
+          size_t last = spelled.rfind(' ');
+          preedit.text +=
+              (last == string::npos ? spelled : spelled.substr(last + 1)) +
+              " ";
+        }
       } else {  // raw input
         end = at(i).end;
         if (!at(i).HasTag("phony")) {

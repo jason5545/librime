@@ -256,8 +256,11 @@ an<Sentence> Poet::MakeSentence(const WordGraph& graph,
 // Make `max_sentences` sentences using beam search and dp on word graph.
 //
 // There is no strategy because it unconditionally use grammar.
+// 蓬萊：每個位置的候選句原本放 std::list（每插一句配置一個節點，大多馬上又被擠掉）。改成 vector：
+// 一個位置只在當終點時被改（插入、刪掉重複的、擠掉最後一句），當起點、被後面的句子指著之前已經定案，
+// 所以搬家也沒有人指著它；插入、刪除後的順序跟 list 逐一相同
 struct PoetStates {
-  map<int, std::list<Line>> states;
+  map<int, vector<Line>> states;
 };
 
 an<PoetStates> NewPoetStates() {
@@ -307,6 +310,8 @@ deque<an<Sentence>> Poet::MakeSentences(const WordGraph& graph,
       const DictEntryList& entries = ev.second;
       bool is_rear = end_pos == total_length;
       auto& target_state = states[end_pos];
+      if (target_state.empty())
+        target_state.reserve(beam_width + 1);
 
       for (const auto& source_line : source_state) {
         // 蓬萊：前文每個來源只算一次（原本每個詞都重組一次字串）
@@ -338,6 +343,9 @@ deque<an<Sentence>> Poet::MakeSentences(const WordGraph& graph,
           auto it = std::find_if(
               target_state.begin(), target_state.end(),
               [&](const Line& l) { return l.weight < new_line.weight; });
+          // 蓬萊：滿了又排在最後，插進去也是馬上被擠掉
+          if (it == target_state.end() && target_state.size() >= beam_width)
+            continue;
           target_state.insert(it, new_line);
           if (target_state.size() > beam_width)
             target_state.pop_back();

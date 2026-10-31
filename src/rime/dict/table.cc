@@ -633,32 +633,14 @@ bool Table::Query(const SyllableGraph& syll_graph,
       }
       continue;
     }
-    for (const auto& spellings : index->second) {
-      SyllableId syll_id = spellings.first;
-      // 這一層的節點（TableQuery::Access、Walk 找的是同一個）
-      const List<table::Entry>* entries = nullptr;
-      const OffsetPtr<table::PhraseIndex>* next_level = nullptr;
-      if (query.level == 0) {
-        if (syll_id >= 0 && syll_id < static_cast<SyllableId>(index_->size)) {
-          auto node = &index_->at[syll_id];
-          entries = &node->entries;
-          next_level = &node->next_level;
-        }
-      } else {
-        auto trunk = query.level == 1 ? query.lv2 : query.lv3;
-        if (trunk) {
-          auto node = find_node(trunk->begin(), trunk->end(), syll_id);
-          if (node != trunk->end()) {
-            entries = &node->entries;
-            next_level = &node->next_level;
-          }
-        }
-      }
-      if (!entries)
-        continue;  // Access 是空的、Walk 失敗
+    // 找到節點的音節：收詞、往下一層（TableQuery::Access、Walk 找的是同一個節點）
+    auto visit = [&](SyllableId syll_id,
+                     const vector<const EdgeProperties*>& spellings,
+                     const List<table::Entry>* entries,
+                     const OffsetPtr<table::PhraseIndex>* next_level) {
       const bool has_entries = entries->size && entries->at;
       const bool can_advance = *next_level;
-      for (auto props : spellings.second) {
+      for (auto props : spellings) {
         size_t end_pos = props->end_pos;
         if (watermark && end_pos > *watermark)
           *watermark = end_pos;
@@ -691,6 +673,66 @@ bool Table::Query(const SyllableGraph& syll_graph,
             next.lv4 = &(*next_level)->tail();
           q.push_back(next);
         }
+      }
+    };
+    const auto& spelling_index = index->second;
+    if (query.level == 0) {
+      for (const auto& spellings : spelling_index) {
+        SyllableId syll_id = spellings.first;
+        if (syll_id >= 0 && syll_id < static_cast<SyllableId>(index_->size)) {
+          auto node = &index_->at[syll_id];
+          visit(syll_id, spellings.second, &node->entries, &node->next_level);
+        }
+      }
+      continue;
+    }
+    auto trunk = query.level == 1 ? query.lv2 : query.lv3;
+    if (!trunk)
+      continue;  // Walk 失敗：每個音節都找不到節點
+    // 第二、三層：音節（spelling_index）和這一層的節點（trunk）都照音節編號由小到大排，原本每個音節各自
+    // 在節點裡二分搜尋（find_node）。改成照順序往後找、節點找完就停；節點比音節少很多時反過來，逐一找音節。
+    // 處理的音節、順序都跟原本相同（節點的編號不重複時；重複時原本只會找到第一個，這裡也只用第一個）
+    if (spelling_index.empty())
+      continue;
+    // 只看編號落在這些音節最小到最大之間的節點（簡拼的音節是連續的一段）
+    table::TrunkIndexNode target;
+    target.key = spelling_index.begin()->first;
+    table::TrunkIndexNode* first =
+        std::lower_bound(trunk->begin(), trunk->end(), target, node_less);
+    target.key = spelling_index.rbegin()->first;
+    table::TrunkIndexNode* last =
+        std::upper_bound(first, trunk->end(), target, node_less);
+    if (first == last)
+      continue;
+    if (static_cast<size_t>(last - first) * 4 < spelling_index.size()) {
+      for (auto node = first; node != last; ++node) {
+        if (node != trunk->begin() && (node - 1)->key == node->key)
+          continue;
+        auto found = spelling_index.find(node->key);
+        if (found != spelling_index.end())
+          visit(node->key, found->second, &node->entries, &node->next_level);
+      }
+    } else {
+      auto node = first;
+      for (const auto& spellings : spelling_index) {
+        SyllableId syll_id = spellings.first;
+        // 從上一個位置往後指數搜尋
+        if (node->key < syll_id) {
+          size_t step = 1;
+          auto lo = node + 1;
+          while (lo + step < last && (lo + step - 1)->key < syll_id) {
+            lo += step;
+            step <<= 1;
+          }
+          target.key = syll_id;
+          node = std::lower_bound(lo, (std::min)(lo + step, last), target,
+                                  node_less);
+          if (node == last)
+            break;
+        }
+        if (syll_id < node->key)
+          continue;
+        visit(syll_id, spellings.second, &node->entries, &node->next_level);
       }
     }
   }

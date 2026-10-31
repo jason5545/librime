@@ -44,6 +44,9 @@ struct DfsState {
   // 和已知的前綴範圍 [lo, hi)（最上層是整個陣列，DfsLookup 算過自己這一層的才放進來）
   const vector<pair<string, string>>* rows = nullptr;
   vector<pair<size_t, size_t>> ranges;
+  // 蓬萊：學習紀錄的版本（LevelDb 才有；TopLowerBound 的快取靠它判斷副本有沒有換過）
+  bool has_version = false;
+  size_t data_version = 0;
 
   // 讀取位置設成「Jump 到第 index 筆、再讀一筆」之後的樣子（跟 ForwardScan 的結果相同）
   void PlaceAfter(size_t index) {
@@ -279,8 +282,9 @@ UserDictionary::~UserDictionary() {
 void UserDictionary::Attach(const an<Table>& table, const an<Prism>& prism) {
   table_ = table;
   prism_ = prism;
-  syllables_in_order_ = -1;  // 蓬萊：換了詞典要重查（SyllablesInOrder）
+  syllables_in_order_ = -1;  // 蓬萊：換了詞典要重查（SyllablesInOrder、TopLowerBound）
   syllable_count_ = 0;
+  top_bounds_.clear();
 }
 
 bool UserDictionary::Load() {
@@ -429,6 +433,11 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
   const string* last_syllable = nullptr;
   string prefix;
   size_t present_index = 0;  // filter 時，學習紀錄裡有的這個音節的落點
+  // 蓬萊：最上層（前綴是空的、範圍是整個副本）每個音節的落點就是整個陣列的 lower_bound，照音節編號記著
+  //（TopLowerBound），不用每個都往後指數搜尋。音節照拼法順序來，上一個的落點不會在它後面，結果跟 gallop_after 相同
+  const bool top_cache = can_skip && current_prefix.empty() &&
+                         state->has_version && lo == 0 && hi > 0 &&
+                         hi == rows->size() && hi < UINT32_MAX;
   for (size_t k = 0; k < num_syllables; ++k) {
     const auto& spelling = *(spellings.begin() + k);
     DLOG(INFO) << "prefix: '" << current_prefix << "'"
@@ -447,7 +456,11 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
         cursor = lo;
       last_syllable = &syllable;
       int cmp = 1;
-      cursor = gallop_after(*rows, cursor, hi, base, syllable, &cmp);
+      if (top_cache)
+        cursor = TopLowerBound(*rows, state->data_version, spelling.first,
+                               syllable, &cmp);
+      else
+        cursor = gallop_after(*rows, cursor, hi, base, syllable, &cmp);
       const size_t found = cursor;
       if (found < hi && cmp == 0) {
         settle();  // 學習紀錄裡有：照原本的做法處理這個音節
@@ -639,10 +652,13 @@ an<UserDictEntryCollector> UserDictionary::Lookup(
   state.credibility.push_back(initial_credibility);
   state.quality_len.push_back(0.0);
   // 蓬萊：LevelDB 的學習紀錄改查記憶體副本（level_db.cc 的 LevelDbMirror），順序和內容跟 Query("") 相同
-  if (auto level_db = As<LevelDb>(db_))
+  if (auto level_db = As<LevelDb>(db_)) {
     state.accessor = level_db->QueryUserEntries();
-  else
+    state.has_version = true;
+    state.data_version = level_db->version();
+  } else {
     state.accessor = db_->Query("");
+  }
   state.accessor->Jump(" ");  // skip metadata
   // 蓬萊：記憶體副本只放 key ≥ " " 的詞條，最上層的範圍就是整個陣列
   state.rows = state.accessor->SortedRecords();
@@ -883,6 +899,35 @@ bool UserDictionary::SyllablesInOrder() {
     }
   }
   return syllables_in_order_ == 1;
+}
+
+size_t UserDictionary::TopLowerBound(const vector<pair<string, string>>& rows,
+                                     size_t version,
+                                     SyllableId syllable_id,
+                                     const string& spelling,
+                                     int* cmp) {
+  constexpr uint32_t kUnknown = UINT32_MAX;
+  if (top_rows_ != &rows || top_rows_size_ != rows.size() ||
+      top_version_ != version || top_bounds_.size() != syllable_count_) {
+    top_rows_ = &rows;
+    top_rows_size_ = rows.size();
+    top_version_ = version;
+    top_bounds_.assign(syllable_count_, TopBound{kUnknown, 0});
+  }
+  auto& b = top_bounds_[syllable_id];  // 呼叫的地方確認過編號 < syllable_count_
+  if (b.index == kUnknown) {
+    const size_t found =
+        std::partition_point(rows.begin(), rows.end(),
+                             [&](const pair<string, string>& row) {
+                               return compare_after(row.first, 0, spelling) < 0;
+                             }) -
+        rows.begin();
+    b.index = static_cast<uint32_t>(found);
+    b.cmp = found < rows.size() ? compare_after(rows[found].first, 0, spelling)
+                                : 1;
+  }
+  *cmp = b.cmp;
+  return b.index;
 }
 
 const string& UserDictionary::SyllableSpelling(SyllableId syllable_id) {

@@ -10,6 +10,7 @@
 
 #include <stdint.h>
 #include <algorithm>
+#include <boost/container/flat_map.hpp>
 #include <rime_api.h>
 #include <rime/common.h>
 #include "spelling.h"
@@ -28,7 +29,10 @@ struct EdgeProperties : SpellingProperties {
   set<size_t> ambiguous_source_positions;
 };
 
-using SpellingMap = map<SyllableId, EdgeProperties>;
+// 蓬萊：一條邊（起點、終點）上的音節原本是 std::map，簡拼的邊一次 40–90 個，每鍵整張圖重建一次，
+// 每個音節配置、釋放一個節點。改成 flat_map（照音節編號排好的連續陣列，find、走訪、insert、operator[] 一樣）；
+// 建好之後不再增刪（Transpose 指著裡面的 EdgeProperties）
+using SpellingMap = boost::container::flat_map<SyllableId, EdgeProperties>;
 using VertexMap = map<size_t, SpellingType>;
 using EndVertexMap = map<size_t, SpellingMap>;
 using EdgeMap = map<size_t, EndVertexMap>;

@@ -136,11 +136,16 @@ int Syllabifier::BuildSyllableGraph(const string& input,
               props.is_correction = true;
               props.credibility = kCorrectionCredibility;
             }
-            auto it = spellings.find(syllable_id);
-            if (it == spellings.end()) {
-              spellings.insert({syllable_id, props});
+            // 蓬萊：音節多半照編號由小到大來，比最後一個大就直接接在後面（flat_map）
+            if (spellings.empty() || spellings.rbegin()->first < syllable_id) {
+              spellings.emplace_hint(spellings.end(), syllable_id, props);
             } else {
-              it->second.type = (std::min)(it->second.type, props.type);
+              auto it = spellings.find(syllable_id);
+              if (it == spellings.end()) {
+                spellings.insert({syllable_id, props});
+              } else {
+                it->second.type = (std::min)(it->second.type, props.type);
+              }
             }
             // let end_vertex_type be the best (smaller) type of spelling
             // that ends at the vertex
@@ -187,19 +192,26 @@ int Syllabifier::BuildSyllableGraph(const string& input,
       // remove disqualified syllables (eg. matching abbreviated spellings)
       // when there is a path of more favored type
       SpellingType edge_type = kInvalidSpelling;
-      for (auto k = j->second.begin(); k != j->second.end();) {
+      // 蓬萊：SpellingMap 是 flat_map，一個一個 erase 每次都要搬後面的（按下聲調鍵時簡拼整批刪掉）。
+      // 判斷照原本的順序做，留下來的照順序搬到前面，最後一次刪掉
+      size_t kept = 0;
+      for (auto k = j->second.begin(); k != j->second.end(); ++k) {
+        bool keep = true;
         if (k->second.is_correction) {
-          ++k;
-          continue;  // Don't care correction edges
+          // Don't care correction edges
+        } else if (k->second.type > last_type) {
+          keep = false;
+        } else if (k->second.type < edge_type) {
+          edge_type = k->second.type;
         }
-        if (k->second.type > last_type) {
-          j->second.erase(k++);
-        } else {
-          if (k->second.type < edge_type)
-            edge_type = k->second.type;
-          ++k;
+        if (keep) {
+          auto dest = j->second.begin() + kept;
+          if (dest != k)
+            *dest = boost::move(*k);
+          ++kept;
         }
       }
+      j->second.erase(j->second.begin() + kept, j->second.end());
       if (j->second.empty()) {
         graph->edges[i].erase(j++);
       } else {
@@ -229,6 +241,9 @@ int Syllabifier::BuildSyllableGraph(const string& input,
       size_t code_length = end_pos - current_pos;
       auto& end_vertices(graph->edges[current_pos]);
       auto& spellings(end_vertices[end_pos]);
+      // 蓬萊：最多 512 個鍵、音節順序不一定，flat_map 逐一插入會一直搬。先照原本的順序收集，
+      // 照音節編號穩定排序、同一個音節留第一個（原本 insert 已經有的不換），再照順序放進去
+      vector<pair<SyllableId, SpellingProperties>> collected;
       for (const auto& m : keys) {
         if (m.length < code_length)
           continue;
@@ -246,10 +261,21 @@ int Syllabifier::BuildSyllableGraph(const string& input,
             props.end_pos = end_pos;
             // add a syllable with properties to the edge's
             // spelling-to-syllable map
-            spellings.insert({syllable_id, props});
+            collected.emplace_back(syllable_id, props);
           }
           accessor.Next();
         }
+      }
+      std::stable_sort(collected.begin(), collected.end(),
+                       [](const pair<SyllableId, SpellingProperties>& a,
+                          const pair<SyllableId, SpellingProperties>& b) {
+                         return a.first < b.first;
+                       });
+      for (size_t c = 0; c < collected.size(); ++c) {
+        if (c > 0 && collected[c].first == collected[c - 1].first)
+          continue;
+        spellings.insert(spellings.end(),
+                         {collected[c].first, collected[c].second});
       }
       if (spellings.empty()) {
         DLOG(INFO) << "no completion could be made.";

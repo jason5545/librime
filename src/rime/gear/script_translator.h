@@ -28,6 +28,7 @@ struct RawInputFormat;
 struct SentenceCache;
 class UserDictionary;
 struct SyllableGraph;
+class TypingStyleTracker;
 
 // 蓬萊：同一段輸入兩種切法比整句分數時，換成另一種切法要多贏的分數（log 機率）。選字時吃幾個鍵
 // （translator/extend_selection，docs/optimization.md 第 4 項第 6 條）用它；translator/split_penalty 可以改
@@ -77,6 +78,11 @@ class ScriptTranslator : public Translator,
   // 蓬萊：跨按鍵沿用的整句材料（script_translator.cc 的 SentenceCache）。帶上這次查詞用的詞典、學習紀錄，
   // 跟上次不同（讀音變體、隱藏詞清單、學習紀錄寫入）就整個清掉
   SentenceCache* sentence_cache(Dictionary* dict, UserDictionary* user_dict);
+  // 蓬萊：打法模型（docs/optimization.md 第 6 項）。這次切音節要不要把罕用黏合音節（translator/glue_syllables）
+  // 改成簡拼類型：打法是 full（只打完整、有聲調的注音）時不改，其他（unknown、abbrev、偵測關掉）照改。nullptr＝不改
+  const hash_set<SyllableId>* glue_spellings();
+  // 打法偵測現在的狀態：off（translator/typing_style 是 off 或沒寫）、unknown、full、abbrev
+  string typing_style() const;
   // 蓬萊：英文單字進整句
   const an<EnglishLexicon>& english_lexicon() const { return english_lexicon_; }
   int english_min_length() const { return english_min_length_; }
@@ -185,6 +191,21 @@ class ScriptTranslator : public Translator,
   double short_sentence_penalty_ = 0;
   int short_sentence_position_ = 2;
   bool short_sentence_full_spelling_ = false;
+  // 蓬萊：打法模型（docs/optimization.md 第 6 項）。translator/typing_style：auto＝送出時數最近的音節
+  // 有多少不帶聲調（只打第一個、完整不帶聲調、聲母＋聲調；英文、數字不算），判成 unknown／full／abbrev，
+  // 存在使用者資料夾的 penglai_typing_style.txt（只有計數）；off＝不偵測，罕用黏合音節照改（跟沒有這個開關一樣）；
+  // unknown／full／abbrev＝釘住狀態（測試用，不數也不寫檔）。狀態寫在 context 的 penglai_typing_style
+  enum class TypingStyleMode { kOff, kAuto, kUnknown, kFull, kAbbrev };
+  void OnCommitForTypingStyle(Context* ctx);
+  void UpdateTypingStyleProperty();
+  bool PrepareGlueSpellings();
+  TypingStyleMode typing_style_mode_ = TypingStyleMode::kOff;
+  vector<string> glue_syllables_;       // 罕用黏合音節（注音，跟詞典的碼一樣）
+  an<Projection> speller_projection_;  // speller/algebra：算罕用黏合音節的正常拼法
+  bool glue_ready_ = false;
+  hash_set<SyllableId> glue_spelling_ids_;  // 那些正常拼法在 prism 裡的編號
+  an<TypingStyleTracker> typing_style_tracker_;
+  connection typing_style_connection_;
 
   int max_homophones_ = 1;
   int spelling_hints_ = 0;

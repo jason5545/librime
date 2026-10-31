@@ -26,6 +26,21 @@ using VertexQueue =
 // 3. 補全 (Completion)：用戶還沒打完，算法瞎猜的。Penalty ≈ -3.0
 const double kCompletionPenalty = -2.995732273553991;      // log(0.05)
 const double kCorrectionCredibility = -4.605170185988091;  // log(0.01)
+// 蓬萊：跟 algo/calculus.cc 的 abbrev 同一個值（log(0.5)）
+const double kGlueAbbreviationPenalty = -0.6931471805599453;
+
+// 蓬萊：罕用黏合音節。方案檔的 abbrev 規則在部署時對這個拼法底下的每個音節做 SpellingProperties::Compose：
+// 類型取比較模糊的、分數加 log(0.5)，存進 prism 時分數是 float。這裡照同樣的順序算、一樣存成 float 再讀回來，
+// 結果跟部署出來的 prism 逐位元組相同
+bool Syllabifier::Glue(SyllableId spelling_id, SpellingProperties* props) const {
+  if (!glue_spellings_ || glue_spellings_->find(spelling_id) == glue_spellings_->end())
+    return false;
+  if (props->type < kAbbreviation)
+    props->type = kAbbreviation;
+  props->credibility = static_cast<float>(props->credibility +
+                                          kGlueAbbreviationPenalty);
+  return true;
+}
 
 int Syllabifier::BuildSyllableGraph(const string& input,
                                     Prism& prism,
@@ -77,6 +92,7 @@ int Syllabifier::BuildSyllableGraph(const string& input,
         for (auto accessor = prism.QuerySpelling(m.first);
              !accessor.exhausted(); accessor.Next()) {
           auto props = accessor.properties();
+          Glue(m.first, &props);
           if (props.type == kNormalSpelling && !props.is_correction) {
             matches.push_back({m.first, m.second.length});
             break;
@@ -107,6 +123,7 @@ int Syllabifier::BuildSyllableGraph(const string& input,
         while (!accessor.exhausted()) {
           SyllableId syllable_id = accessor.syllable_id();
           EdgeProperties props(accessor.properties());
+          Glue(m.value, &props);
           if (strict_spelling_ && matches_input &&
               props.type != kNormalSpelling) {
             // disqualify fuzzy spelling or abbreviation as single word
@@ -222,6 +239,7 @@ int Syllabifier::BuildSyllableGraph(const string& input,
         while (!accessor.exhausted()) {
           SyllableId syllable_id = accessor.syllable_id();
           SpellingProperties props = accessor.properties();
+          Glue(m.value, &props);
           if (props.type < kAbbreviation) {
             props.type = kCompletion;
             props.credibility += kCompletionPenalty;

@@ -25,12 +25,15 @@
 #include <rime/switches.h>
 #include <rime/translation.h>
 #include <limits>
+#include <mutex>
+#include <sstream>
 #include <optional>
 #include <rime/menu.h>
 #include <rime/algo/syllabifier.h>
 #include <rime/dict/corrector.h>
 #include <rime/dict/dictionary.h>
 #include <rime/dict/prism.h>
+#include <rime/dict/table.h>
 #include <rime/dict/user_dictionary.h>
 #include <rime/gear/english_lexicon.h>
 #include <rime/gear/poet.h>
@@ -44,6 +47,121 @@ namespace rime {
 
 // 蓬萊（speller/digit_lead_tones）：跟 abc_segmentor 同一個標籤
 static const char kDigitLeadTag[] = "digit_lead";
+
+// 蓬萊：打法偵測（translator/typing_style: auto，docs/optimization.md 第 6 項）。所有 session 共用一份（照檔案分開），
+// 送出時加計數：最近的音節裡「正常拼法」（打完整、有聲調）幾個、「其他」（只打第一個、完整不帶聲調、聲母＋聲調）幾個。
+// 合計超過 kWindow 時兩個一起按比例縮回 kWindow（越早打的佔越少）。合計到 kMinSamples 才判：其他佔 kFullMax 以下
+// 是 full，kAbbrevMin 以上是 abbrev，中間維持原本的狀態（遲滯，不會在門檻附近來回跳）。
+// 存在使用者資料夾，只有狀態和兩個計數、沒有文字；狀態變了馬上寫，不然每 kSaveEvery 次送出寫一次，最後一個 session 結束時也寫
+class TypingStyleTracker {
+ public:
+  enum State { kUnknown, kFull, kAbbrev };
+  static constexpr double kWindow = 200;
+  static constexpr double kMinSamples = 50;
+  static constexpr double kFullMax = 0.02;
+  static constexpr double kAbbrevMin = 0.05;
+  static constexpr int kSaveEvery = 16;
+
+  static an<TypingStyleTracker> Get(const path& file) {
+    static std::mutex mutex;
+    static map<string, weak<TypingStyleTracker>> trackers;
+    std::lock_guard<std::mutex> lock(mutex);
+    auto& slot = trackers[file.string()];
+    if (auto tracker = slot.lock())
+      return tracker;
+    auto tracker = New<TypingStyleTracker>(file);
+    slot = tracker;
+    return tracker;
+  }
+
+  explicit TypingStyleTracker(const path& file) : file_(file) { Load(); }
+  ~TypingStyleTracker() {
+    if (unsaved_ > 0)
+      Save();
+  }
+
+  State state() const { return state_; }
+  static const char* Name(State state) {
+    return state == kFull ? "full" : state == kAbbrev ? "abbrev" : "unknown";
+  }
+
+  void Add(int normal, int other) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (normal + other <= 0)
+      return;
+    normal_ += normal;
+    other_ += other;
+    double total = normal_ + other_;
+    if (total > kWindow) {
+      double k = kWindow / total;
+      normal_ *= k;
+      other_ *= k;
+      total = kWindow;
+    }
+    State next = state_;
+    if (total >= kMinSamples) {
+      double ratio = other_ / total;
+      if (ratio <= kFullMax)
+        next = kFull;
+      else if (ratio >= kAbbrevMin)
+        next = kAbbrev;
+    }
+    bool changed = next != state_;
+    state_ = next;
+    if (changed || ++unsaved_ >= kSaveEvery)
+      Save();
+  }
+
+ private:
+  void Load() {
+    std::ifstream in(file_.string());
+    string key;
+    while (in >> key) {
+      if (key == "state") {
+        string value;
+        in >> value;
+        state_ = value == "full" ? kFull : value == "abbrev" ? kAbbrev : kUnknown;
+      } else if (key == "toned") {
+        in >> normal_;
+      } else if (key == "untoned") {
+        in >> other_;
+      } else {
+        string rest;
+        std::getline(in, rest);  // 註解
+      }
+    }
+    if (!(normal_ >= 0) || !(other_ >= 0))
+      normal_ = other_ = 0;
+  }
+
+  void Save() {
+    unsaved_ = 0;
+    path temp = file_;
+    temp += ".new";
+    {
+      std::ofstream out(temp.string(), std::ios::trunc);
+      if (!out)
+        return;
+      out << "# 蓬萊韻：打法偵測（translator/typing_style）。只有計數、沒有文字；刪掉會從頭數\n"
+          << "state " << Name(state_) << "\n"
+          << "toned " << normal_ << "\n"
+          << "untoned " << other_ << "\n";
+      if (!out)
+        return;
+    }
+    std::error_code ec;
+    std::filesystem::rename(temp, file_, ec);
+    if (ec)
+      LOG(WARNING) << "typing_style: can't save " << file_ << ": " << ec.message();
+  }
+
+  path file_;
+  std::mutex mutex_;
+  double normal_ = 0;
+  double other_ = 0;
+  State state_ = kUnknown;
+  int unsaved_ = 0;
+};
 
 namespace {
 
@@ -102,9 +220,14 @@ class ScriptSyllabifier : public PhraseSyllabifier {
     if (corrector) {
       syllabifier_.EnableCorrection(corrector);
     }
+    // 蓬萊：罕用黏合音節照打法決定要不要改成簡拼類型（打法 full 時不改）
+    syllabifier_.SetGlueSpellings(translator->glue_spellings());
   }
 
   virtual Spans Syllabify(const Phrase* phrase);
+  // 蓬萊：打法偵測。這個候選每個音節在音節圖上的邊：正常拼法（打完整、有聲調；罕用黏合音節改成簡拼類型的
+  // 也算，照那段按鍵查 prism）加到 normal，其他（只打第一個、完整不帶聲調、聲母＋聲調）加到 other；英文字母的假音節不算
+  void CountSpellingTypes(const Phrase& phrase, int* normal, int* other) const;
   size_t BuildSyllableGraph(Prism& prism);
   string GetPreeditString(const Phrase& cand) const;
   string GetOriginalSpelling(const Phrase& cand) const;
@@ -388,10 +511,11 @@ struct SentenceCache {
     string variant;
     int blacklist_version = 0;
     size_t user_version = 0;
+    bool glue = false;  // 罕用黏合音節有沒有改成簡拼類型（打法模型）：音節圖不同
     bool operator==(const Key& o) const {
       return dict == o.dict && user_dict == o.user_dict &&
              variant == o.variant && blacklist_version == o.blacklist_version &&
-             user_version == o.user_version;
+             user_version == o.user_version && glue == o.glue;
     }
   };
   using Row = SentenceCacheRow;
@@ -728,6 +852,36 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
     config->GetBool(name_space_ + "/short_sentence_full_spelling",
                     &short_sentence_full_spelling_);
   }
+  // 蓬萊：打法模型（docs/optimization.md 第 6 項）：罕用黏合音節、打法偵測
+  if (Config* config = engine_->schema()->config()) {
+    string style;
+    config->GetString(name_space_ + "/typing_style", &style);
+    typing_style_mode_ = style == "auto"      ? TypingStyleMode::kAuto
+                         : style == "unknown" ? TypingStyleMode::kUnknown
+                         : style == "full"    ? TypingStyleMode::kFull
+                         : style == "abbrev"  ? TypingStyleMode::kAbbrev
+                                              : TypingStyleMode::kOff;
+    string glue;
+    if (config->GetString(name_space_ + "/glue_syllables", &glue)) {
+      std::istringstream in(glue);
+      string syllable;
+      while (in >> syllable)
+        glue_syllables_.push_back(syllable);
+    }
+    if (!glue_syllables_.empty()) {
+      auto projection = New<Projection>();
+      if (projection->Load(config->GetList("speller/algebra")))
+        speller_projection_ = projection;
+    }
+    if (typing_style_mode_ == TypingStyleMode::kAuto) {
+      typing_style_tracker_ = TypingStyleTracker::Get(
+          Service::instance().deployer().user_data_dir /
+          "penglai_typing_style.txt");
+      typing_style_connection_ = engine_->context()->commit_notifier().connect(
+          [this](Context* ctx) { OnCommitForTypingStyle(ctx); });
+    }
+    UpdateTypingStyleProperty();
+  }
   // 蓬萊：選字時引擎決定選到的詞吃幾個鍵。要比引擎的 OnSelect（照選到的候選切段落）早跑，接在最前面
   if (Config* config = engine_->schema()->config()) {
     config->GetBool(name_space_ + "/extend_selection", &extend_selection_);
@@ -770,6 +924,7 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
 }
 
 ScriptTranslator::~ScriptTranslator() {
+  typing_style_connection_.disconnect();
   extend_select_connection_.disconnect();
   forget_select_connection_.disconnect();
   forget_commit_connection_.disconnect();
@@ -777,6 +932,90 @@ ScriptTranslator::~ScriptTranslator() {
       engine_->context()->raw_input_format() == raw_input_format_) {
     engine_->context()->set_raw_input_format(nullptr);
   }
+}
+
+string ScriptTranslator::typing_style() const {
+  switch (typing_style_mode_) {
+    case TypingStyleMode::kOff:
+      return "off";
+    case TypingStyleMode::kUnknown:
+      return "unknown";
+    case TypingStyleMode::kFull:
+      return "full";
+    case TypingStyleMode::kAbbrev:
+      return "abbrev";
+    case TypingStyleMode::kAuto:
+      break;
+  }
+  return typing_style_tracker_
+             ? TypingStyleTracker::Name(typing_style_tracker_->state())
+             : "unknown";
+}
+
+void ScriptTranslator::UpdateTypingStyleProperty() {
+  if (typing_style_mode_ == TypingStyleMode::kOff)
+    return;
+  Context* ctx = engine_->context();
+  string style = typing_style();
+  if (ctx->get_property("penglai_typing_style") != style)
+    ctx->set_property("penglai_typing_style", style);
+}
+
+bool ScriptTranslator::PrepareGlueSpellings() {
+  if (glue_ready_)
+    return true;
+  if (!dict_ || !dict_->loaded() || !dict_->prism())
+    return false;
+  glue_ready_ = true;
+  Prism& prism = *dict_->prism();
+  // 每個音節照 speller/algebra 推一次，正常拼法（不是容錯）那個就是部署時方案檔的 4C 規則改的拼法
+  for (const auto& syllable : glue_syllables_) {
+    Script script;
+    script.AddSyllable(syllable);
+    if (speller_projection_)
+      speller_projection_->Apply(&script);
+    for (const auto& spelling : script) {
+      for (const auto& s : spelling.second) {
+        int id = -1;
+        if (s.str == syllable && s.properties.type == kNormalSpelling &&
+            !s.properties.is_correction && prism.GetValue(spelling.first, &id))
+          glue_spelling_ids_.insert(id);
+      }
+    }
+  }
+  LOG(INFO) << "glue_syllables: " << glue_syllables_.size() << " syllables, "
+            << glue_spelling_ids_.size() << " spellings.";
+  return true;
+}
+
+const hash_set<SyllableId>* ScriptTranslator::glue_spellings() {
+  if (glue_syllables_.empty())
+    return nullptr;
+  if (typing_style_mode_ == TypingStyleMode::kFull ||
+      (typing_style_mode_ == TypingStyleMode::kAuto && typing_style_tracker_ &&
+       typing_style_tracker_->state() == TypingStyleTracker::kFull))
+    return nullptr;
+  if (!PrepareGlueSpellings() || glue_spelling_ids_.empty())
+    return nullptr;
+  return &glue_spelling_ids_;
+}
+
+void ScriptTranslator::OnCommitForTypingStyle(Context* ctx) {
+  if (!typing_style_tracker_)
+    return;
+  int normal = 0, other = 0;
+  for (const auto& seg : ctx->composition()) {
+    auto phrase = As<Phrase>(
+        Candidate::GetGenuineCandidate(seg.GetSelectedCandidate()));
+    if (!phrase)
+      continue;
+    if (auto syllabifier = As<ScriptSyllabifier>(phrase->syllabifier()))
+      syllabifier->CountSpellingTypes(*phrase, &normal, &other);
+  }
+  if (normal + other == 0)
+    return;
+  typing_style_tracker_->Add(normal, other);
+  UpdateTypingStyleProperty();
 }
 
 an<Translation> ScriptTranslator::Query(const string& input,
@@ -867,6 +1106,7 @@ SentenceCache* ScriptTranslator::sentence_cache(Dictionary* dict,
   key.variant = dict ? dict->variant() : string();
   key.blacklist_version = blacklist_version();
   key.user_version = user_dict ? user_dict->data_version() : 0;
+  key.glue = glue_spellings() != nullptr;
   if (!(key == sentence_cache_->key))
     sentence_cache_->Reset(key);
   return sentence_cache_.get();
@@ -1243,6 +1483,72 @@ Spans ScriptSyllabifier::Syllabify(const Phrase* phrase) {
     result.set_vertices(std::move(vertices));
   }
   return result;
+}
+
+void ScriptSyllabifier::CountSpellingTypes(const Phrase& phrase,
+                                           int* normal,
+                                           int* other) const {
+  if (phrase.start() < start_ || phrase.end() < phrase.start())
+    return;
+  an<Table> table;
+  Prism* prism = nullptr;
+  if (translator_->dict()) {
+    table = translator_->dict()->primary_table();
+    prism = translator_->dict()->prism().get();
+  }
+  // 罕用黏合音節改成簡拼類型的邊：那段按鍵（去掉分隔鍵）就是清單裡的正常拼法
+  const hash_set<SyllableId>* glue = translator_->glue_spellings();
+  const string& delimiters = translator_->delimiters();
+  auto is_glue = [&](size_t current_pos, size_t next_pos) {
+    if (!glue || !prism)
+      return false;
+    string keys;
+    for (size_t i = current_pos; i < next_pos && i < input_.length(); ++i) {
+      if (delimiters.find(input_[i]) == string::npos)
+        keys += input_[i];
+    }
+    int id = -1;
+    return prism->GetValue(keys, &id) && glue->find(id) != glue->end();
+  };
+  vector<int> kinds;  // 1：正常拼法，0：其他，-1：不算
+  SyllabifyTask task{
+      phrase.code(), syllable_graph_, phrase.end() - start_,
+      [&](SyllabifyTask* task, size_t depth, size_t current_pos,
+          size_t next_pos) {
+        int kind = -1;
+        SyllableId id = task->code[depth];
+        auto start_iter = syllable_graph_.edges.find(current_pos);
+        if (start_iter != syllable_graph_.edges.end()) {
+          auto end_iter = start_iter->second.find(next_pos);
+          if (end_iter != start_iter->second.end()) {
+            auto prop_iter = end_iter->second.find(id);
+            if (prop_iter != end_iter->second.end()) {
+              const auto& props = prop_iter->second;
+              kind = props.type == kNormalSpelling ||
+                             (props.type == kAbbreviation &&
+                              is_glue(current_pos, next_pos))
+                         ? 1
+                         : 0;
+            }
+          }
+        }
+        // 英文字母的假音節（注音＋~）
+        if (kind >= 0 && table) {
+          string syllable = table->GetSyllableById(id);
+          if (syllable.empty() || syllable.back() == '~')
+            kind = -1;
+        }
+        kinds.push_back(kind);
+      },
+      [&](SyllabifyTask* task, size_t depth) { kinds.pop_back(); }};
+  if (!syllabify_dfs(&task, 0, phrase.start() - start_))
+    return;
+  for (int kind : kinds) {
+    if (kind == 1)
+      ++*normal;
+    else if (kind == 0)
+      ++*other;
+  }
 }
 
 size_t ScriptSyllabifier::BuildSyllableGraph(Prism& prism) {
@@ -2313,6 +2619,7 @@ bool ScriptTranslation::EnrollSegment(
                               translator_->strict_spelling());
       if (corrector_)
         syllabifier.EnableCorrection(corrector_);
+      syllabifier.SetGlueSpellings(translator_->glue_spellings());
       SyllableGraph syllable_graph;
       string seg = input_.substr(seg_start, seg_end - seg_start);
       size_t consumed =

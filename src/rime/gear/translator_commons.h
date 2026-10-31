@@ -76,6 +76,8 @@ class Phrase : public Candidate {
   void set_syllabifier(an<PhraseSyllabifier> syllabifier) {
     syllabifier_ = syllabifier;
   }
+  // 蓬萊：送出時數這個候選每個音節是怎麼打的（打法偵測）
+  const an<PhraseSyllabifier>& syllabifier() const { return syllabifier_; }
   double weight() const { return entry_->weight; }
   void set_weight(double weight) { entry_->weight = weight; }
   Code& code() const { return entry_->code; }

@@ -185,8 +185,15 @@ class Syllabifier {
                                   Prism& prism,
                                   SyllableGraph* graph);
   RIME_DLL void EnableCorrection(Corrector* corrector);
+  // 蓬萊：罕用黏合音節（docs/optimization.md 第 4 項第 4 條 4C）。這幾個拼法（prism 的拼法編號）底下的音節
+  // 一律改成簡拼類型、多扣一次簡拼的分，跟方案檔 speller/algebra 寫 abbrev → erase → xform 三條規則
+  // 部署出來的 prism 逐位元組相同的結果，只是改成打字時決定（照打法開關）。nullptr＝不改
+  void SetGlueSpellings(const hash_set<SyllableId>* spellings) {
+    glue_spellings_ = spellings;
+  }
 
  protected:
+  bool Glue(SyllableId spelling_id, SpellingProperties* props) const;
   void CheckOverlappedSpellings(SyllableGraph* graph, size_t start, size_t end);
   void Transpose(SyllableGraph* graph);
 
@@ -194,6 +201,7 @@ class Syllabifier {
   bool enable_completion_ = false;
   bool strict_spelling_ = false;
   Corrector* corrector_ = nullptr;
+  const hash_set<SyllableId>* glue_spellings_ = nullptr;
 };
 
 }  // namespace rime

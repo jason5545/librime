@@ -125,6 +125,13 @@ class UserDictionary : public Class<UserDictionary, const Ticket&> {
   const string& SyllableSpelling(SyllableId syllable_id);
   // 蓬萊：音節編號由小到大是不是就是「拼法＋空白」由小到大（查一次記著）
   bool SyllablesInOrder();
+  // 蓬萊：rows（學習紀錄的記憶體副本）裡第一筆 ≥「拼法＋空白」的位置，*cmp 是那一筆跟「拼法＋空白」比的結果
+  //（跟 DfsLookup 的 compare_after 一樣：0 以它開頭；到底了是 1）。照副本的位址、筆數、學習紀錄版本記著
+  size_t TopLowerBound(const vector<pair<string, string>>& rows,
+                       size_t version,
+                       SyllableId syllable_id,
+                       const string& spelling,
+                       int* cmp);
 
   void DfsLookup(const SyllableGraph& syll_graph,
                  size_t current_pos,
@@ -141,6 +148,15 @@ class UserDictionary : public Class<UserDictionary, const Ticket&> {
   vector<const string*> spelling_by_id_;  // 蓬萊：SyllableSpelling 的快取
   int syllables_in_order_ = -1;           // 蓬萊：SyllablesInOrder 的結果（-1 還沒查）
   size_t syllable_count_ = 0;             // 蓬萊：SyllablesInOrder 查過的音節數（編號 0 到它減一）
+  // 蓬萊：TopLowerBound 的快取（照音節編號；index 是 kUnknown 的還沒算）和它對應的副本、版本
+  struct TopBound {
+    uint32_t index;
+    int32_t cmp;
+  };
+  vector<TopBound> top_bounds_;
+  const void* top_rows_ = nullptr;
+  size_t top_rows_size_ = 0;
+  size_t top_version_ = 0;
   TickCount tick_ = 0;
   time_t transaction_time_ = 0;
 };

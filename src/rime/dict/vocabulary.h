@@ -55,6 +55,9 @@ struct DictEntry {
   int commit_count = 0;
   int remaining_code_length = 0;
   int matching_code_size = 0;
+  // 蓬萊：學習紀錄的詞條最後一次寫入時的 tick（UserDbValue::tick；系統詞典的詞條是 0）。
+  // 候選排序判斷「最近打過」用（translator/recent_phrase_window）
+  uint64_t tick = 0;
 
   DictEntry() = default;
   ShortDictEntry ToShort() const { return {text, code, weight}; }

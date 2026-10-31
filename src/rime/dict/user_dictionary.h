@@ -28,6 +28,13 @@ class UserDictEntryIterator : public DictEntryFilterBinder {
   bool Next();
   bool exhausted() const { return index_ >= cache_.size(); }
   size_t cache_size() const { return cache_.size(); }
+  // 蓬萊：還沒出的詞條（照過濾器）逐一交給 f，不移動位置（候選排序挑最近打過的詞用）
+  template <class F>
+  void ForEachRemaining(F&& f) const {
+    for (size_t i = index_; i < cache_.size(); ++i)
+      if (!filter_ || filter_(cache_[i]))
+        f(cache_[i]);
+  }
 
  protected:
   bool FindNextEntry();

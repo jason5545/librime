@@ -64,6 +64,10 @@ class ScriptTranslator : public Translator,
   int core_word_length() const;
   int max_user_phrase_syllables() const { return max_user_phrase_syllables_; }
   double split_penalty() const { return split_penalty_; }
+  // 蓬萊：候選排序（docs/optimization.md 第 4 項第 1 條）
+  int long_phrase_quota() const { return long_phrase_quota_; }
+  int recent_phrase_max() const { return recent_phrase_max_; }
+  int recent_phrase_window() const { return recent_phrase_window_; }
   // 蓬萊：跨按鍵沿用的整句材料（script_translator.cc 的 SentenceCache）。帶上這次查詞用的詞典、學習紀錄，
   // 跟上次不同（讀音變體、隱藏詞清單、學習紀錄寫入）就整個清掉
   SentenceCache* sentence_cache(Dictionary* dict, UserDictionary* user_dict);
@@ -158,6 +162,13 @@ class ScriptTranslator : public Translator,
   int extend_evaluated_ = 0;
   int extend_taken_ = 0;
   connection extend_select_connection_;
+  // 蓬萊：候選排序（docs/optimization.md 第 4 項第 1 條；0 都是照原版）。
+  // long_phrase_quota：蓋不住整段的詞裡，三個音節以上的每種長度先出幾個，其餘排到二字、一字後面。
+  // recent_phrase_max：學習紀錄裡最近打過的詞（兩個音節以上、蓋不住整段）最多幾個拉到整句、整段剛好的詞後面；
+  // recent_phrase_window：「最近」是學習紀錄最近幾次送出以內（0＝不限，照最後一次打的先後挑）
+  int long_phrase_quota_ = 0;
+  int recent_phrase_max_ = 0;
+  int recent_phrase_window_ = 0;
 
   int max_homophones_ = 1;
   int spelling_hints_ = 0;

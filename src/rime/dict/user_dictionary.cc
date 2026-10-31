@@ -963,6 +963,7 @@ an<DictEntry> UserDictionary::CreateDictEntry(const string& key,
   e = New<DictEntry>();
   e->text = key.substr(separator_pos + 1);
   e->commit_count = v.commits;
+  e->tick = v.tick;
   const auto& sc = scoring();
   double weight;
   if (sc.mode == 1) {

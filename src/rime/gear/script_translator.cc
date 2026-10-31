@@ -211,6 +211,25 @@ class ScriptTranslation : public Translation {
   bool PhrasesExhausted() const;
   // 還沒放英文候選時的第一候選（判斷用；不改變之後出候選的順序）
   an<Phrase> PeekFirstCandidate();
+  // 蓬萊：候選排序（translator/long_phrase_quota、recent_phrase_max，docs/optimization.md 第 4 項第 1 條）。
+  // 整句、整段剛好的詞照原本的順序先出（第一個候選一定不動）；接著是學習紀錄裡最近打過的詞（recent_）；
+  // 再來照原本的順序，只是蓋不住整段、三個音節以上的詞每種長度出到名額就先收著（deferred_），其他都出完才出
+  void PickRecentPhrases(UserDictionary* user_dict);
+  bool HeadDone() const;
+  an<Phrase> MakePhrase(const an<DictEntry>& entry,
+                        size_t code_length,
+                        bool user) const;
+  struct Deferred {
+    an<DictEntry> entry;
+    size_t code_length;
+    bool user;
+  };
+  vector<pair<an<DictEntry>, size_t>> recent_;  // 新到舊；（詞條, 蓋住幾個鍵）
+  set<const DictEntry*> recent_set_;            // 原本的位置輪到時跳過
+  size_t recent_index_ = 0;
+  deque<Deferred> deferred_;
+  map<size_t, int> quota_used_;  // 音節數 → 蓋不住整段的詞出了幾個
+  set<string> quota_texts_;      // 算過名額的詞
 
   ScriptTranslator* translator_;
   Poet* poet_;
@@ -240,6 +259,8 @@ class ScriptTranslation : public Translation {
     kSentence,
     kEnglish,
     kEnglishLate,
+    kRecent,
+    kDeferred,
   };
   CandidateSource candidate_source_ = kUninitialized;
 
@@ -687,6 +708,13 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
       forget_select_connection_ = ctx->select_notifier().connect(
           [this](Context* ctx) { OnSelectForForget(ctx); });
     }
+  }
+  // 蓬萊：候選排序（docs/optimization.md 第 4 項第 1 條）
+  if (Config* config = engine_->schema()->config()) {
+    config->GetInt(name_space_ + "/long_phrase_quota", &long_phrase_quota_);
+    config->GetInt(name_space_ + "/recent_phrase_max", &recent_phrase_max_);
+    config->GetInt(name_space_ + "/recent_phrase_window",
+                   &recent_phrase_window_);
   }
   // 蓬萊：選字時引擎決定選到的詞吃幾個鍵。要比引擎的 OnSelect（照選到的候選切段落）早跑，接在最前面
   if (Config* config = engine_->schema()->config()) {
@@ -1313,6 +1341,8 @@ bool ScriptTranslation::Evaluate(Dictionary* dict, UserDictionary* user_dict) {
     phrase_iter_ = phrase_->rbegin();
   if (user_phrase_)
     user_phrase_iter_ = user_phrase_->rbegin();
+  if (user_phrase_ && translator_->recent_phrase_max() > 0)
+    PickRecentPhrases(user_dict);
 
   auto is_correction_match = [&](auto& iter_pair, size_t len) {
     if (iter_pair.first != len || iter_pair.second.exhausted())
@@ -1378,8 +1408,24 @@ bool ScriptTranslation::Next() {
         if (!english_late_.empty())
           english_late_.pop_front();
         break;
+      case kRecent:
+        ++recent_index_;
+        break;
+      case kDeferred:
+        if (!deferred_.empty())
+          deferred_.pop_front();
+        break;
       case kUserPhrase: {
         UserDictEntryIterator& uter(user_phrase_iter_->second);
+        // 蓬萊：第一個候選本來就是最近打過的詞（前面沒有整句、整段剛好的詞），之後不再拉一次
+        if (candidate_ && recent_set_.erase(&candidate_->entry())) {
+          for (auto it = recent_.begin(); it != recent_.end(); ++it) {
+            if (it->first.get() == &candidate_->entry()) {
+              recent_.erase(it);
+              break;
+            }
+          }
+        }
         if (!uter.Next()) {
           ++user_phrase_iter_;
         }
@@ -1391,6 +1437,13 @@ bool ScriptTranslation::Next() {
         }
       } break;
     }
+    // 蓬萊：出了一個蓋不住整段、三個音節以上的詞，那個長度的名額少一個（同一個詞不同讀音只算一次：
+    // 「是一種」的 一 有好幾個聲調，後面的 DistinctTranslation 只留第一個）
+    if ((candidate_source_ == kUserPhrase || candidate_source_ == kSysPhrase) &&
+        candidate_ && candidate_->code().size() >= 3 &&
+        candidate_->end() < end_of_input_ &&
+        quota_texts_.insert(candidate_->text()).second)
+      ++quota_used_[candidate_->code().size()];
     candidate_.reset();
     candidate_source_ = kUninitialized;
     if (enable_correction_) {
@@ -1478,7 +1531,24 @@ iter_incremented:
     candidate_ = sentences_[0];
     return true;
   }
+  // 蓬萊：學習紀錄裡最近打過的詞接在整句、整段剛好的詞後面
+  if (recent_index_ < recent_.size() && HeadDone()) {
+    const auto& r = recent_[recent_index_];
+    candidate_source_ = kRecent;
+    candidate_ = MakePhrase(r.first, r.second, true);
+    return true;
+  }
   const size_t full_code_length = end_of_input_ - start_;
+  const int quota = translator_->long_phrase_quota();
+  // 蓬萊：這個詞要先收著（蓋不住整段、三個音節以上、那個長度出到名額了；第一個候選不收）
+  auto over_quota = [&](const an<DictEntry>& entry, size_t code_length) {
+    if (quota <= 0 || candidate_index_ == 0 ||
+        code_length >= full_code_length || entry->code.size() < 3 ||
+        quota_texts_.count(entry->text))
+      return false;
+    auto used = quota_used_.find(entry->code.size());
+    return used != quota_used_.end() && used->second >= quota;
+  };
   size_t user_phrase_code_length = 0;
   if (user_phrase_ && user_phrase_iter_ != user_phrase_->rend()) {
     user_phrase_code_length = user_phrase_iter_->first;
@@ -1514,6 +1584,17 @@ iter_incremented:
           })) {
     UserDictEntryIterator& uter = user_phrase_iter_->second;
     const auto& entry = uter.Peek();
+    // 蓬萊：已經拉到前面的最近打過的詞、超過名額的長詞：跳過（後者收著最後出）
+    bool skip = candidate_index_ > 0 && recent_set_.count(entry.get());
+    if (!skip && over_quota(entry, user_phrase_code_length)) {
+      deferred_.push_back({entry, user_phrase_code_length, true});
+      skip = true;
+    }
+    if (skip) {
+      if (!uter.Next())
+        ++user_phrase_iter_;
+      goto iter_incremented;
+    }
     DLOG(INFO) << "user phrase '" << entry->text
                << "', code length: " << user_phrase_code_length;
     candidate_source_ = kUserPhrase;
@@ -1532,6 +1613,12 @@ iter_incremented:
       goto iter_incremented;
     }
     const auto& entry = iter.Peek();
+    if (over_quota(entry, phrase_code_length)) {
+      deferred_.push_back({entry, phrase_code_length, false});
+      if (!iter.Next())
+        ++phrase_iter_;
+      goto iter_incremented;
+    }
     DLOG(INFO) << "phrase '" << entry->text
                << "', code length: " << phrase_code_length;
     candidate_source_ = kSysPhrase;
@@ -1543,11 +1630,78 @@ iter_incremented:
                             translator_->initial_quality() +
                             (entry->quality_len / full_code_length));
     return true;
+  } else if (!deferred_.empty()) {
+    // 蓬萊：其他詞都出完了，出收著的長詞
+    const auto& d = deferred_.front();
+    candidate_source_ = kDeferred;
+    candidate_ = MakePhrase(d.entry, d.code_length, d.user);
+    return true;
   } else {
     candidate_source_ = kUninitialized;
     candidate_ = nullptr;
     return false;
   }
+}
+
+void ScriptTranslation::PickRecentPhrases(UserDictionary* user_dict) {
+  const size_t full_code_length = end_of_input_ - start_;
+  const TickCount now = user_dict->tick();
+  const int window = translator_->recent_phrase_window();
+  vector<pair<an<DictEntry>, size_t>> found;
+  for (auto& y : *user_phrase_) {
+    // 整段剛好的本來就排在前面
+    if (y.first >= full_code_length)
+      continue;
+    y.second.ForEachRemaining([&](const an<DictEntry>& e) {
+      if (e->code.size() < 2 || e->IsPredictiveMatch())
+        return;
+      TickCount age = now > e->tick ? now - e->tick : 0;
+      if (window > 0 && age >= static_cast<TickCount>(window))
+        return;
+      found.push_back({e, y.first});
+    });
+  }
+  // 新到舊；一樣新的（同一次送出）蓋住比較多鍵的先
+  std::stable_sort(found.begin(), found.end(), [](const auto& a, const auto& b) {
+    if (a.first->tick != b.first->tick)
+      return a.first->tick > b.first->tick;
+    return a.second > b.second;
+  });
+  set<string> texts;
+  for (const auto& f : found) {
+    if (static_cast<int>(recent_.size()) >= translator_->recent_phrase_max())
+      break;
+    if (!texts.insert(f.first->text).second)
+      continue;
+    recent_.push_back(f);
+    recent_set_.insert(f.first.get());
+  }
+}
+
+bool ScriptTranslation::HeadDone() const {
+  // 第一個候選照原本的
+  if (candidate_index_ == 0)
+    return false;
+  const size_t full_code_length = end_of_input_ - start_;
+  size_t next = 0;
+  if (user_phrase_ && user_phrase_iter_ != user_phrase_->rend())
+    next = (std::max)(next, user_phrase_iter_->first);
+  if (phrase_ && phrase_iter_ != phrase_->rend())
+    next = (std::max)(next, phrase_iter_->first);
+  return next < full_code_length;
+}
+
+an<Phrase> ScriptTranslation::MakePhrase(const an<DictEntry>& entry,
+                                         size_t code_length,
+                                         bool user) const {
+  auto phrase = New<Phrase>(
+      translator_->language(),
+      entry->IsPredictiveMatch() ? "completion"
+                                 : (user ? "user_phrase" : "phrase"),
+      start_, start_ + code_length, entry);
+  phrase->set_quality(std::exp(entry->weight) + translator_->initial_quality() +
+                      (entry->quality_len / (end_of_input_ - start_)));
+  return phrase;
 }
 
 an<Phrase> ScriptTranslation::PeekFirstCandidate() {
@@ -1565,7 +1719,9 @@ bool ScriptTranslation::PhrasesExhausted() const {
 }
 
 bool ScriptTranslation::CheckEmpty() {
-  set_exhausted(PhrasesExhausted() && english_.empty() && english_late_.empty());
+  set_exhausted(PhrasesExhausted() && english_.empty() &&
+                english_late_.empty() && deferred_.empty() &&
+                recent_index_ >= recent_.size());
   return exhausted();
 }
 

@@ -269,7 +269,10 @@ std::unique_ptr<EnglishKeylid::Lattice> EnglishKeylid::Analyze(
     top = kNegInf;
     for (size_t j = 0; j < here.size(); ++j) {
       auto& st = here[j];
-      st.next = Lp(zh_, st.h, pos < n ? lat->ids_[pos] : end_);
+      // 結尾時還是起點的前文＝整串都是英文、沒有中文鍵：不算中文模型的 '$'（空的中文句子幾乎不可能，
+      // 會把整段英文扣掉約 40 分，ovh、agent 這種一整段的英文永遠進不了候選）
+      st.next = pos < n ? Lp(zh_, st.h, lat->ids_[pos])
+                        : (st.h == start ? 0.0 : Lp(zh_, st.h, end_));
       if (pos == n)
         continue;
       Lattice::State to{((st.h << 6) | lat->ids_[pos]) & kMask,

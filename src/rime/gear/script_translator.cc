@@ -3169,6 +3169,9 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
       continue;
     an<Phrase> cand;
     if (config.size() == 1 && config[0].start == 0 && config[0].end == n) {
+      // 整段都是英文：跟單字表外的字母串一樣，第一候選是蓋住整段的一個詞時不另給
+      if (whole_word)
+        continue;
       auto entry = make_entry(config[0]);
       entry->preedit = entry->text;
       cand = New<Phrase>(translator_->language(), "keylid", start_, start_ + n,

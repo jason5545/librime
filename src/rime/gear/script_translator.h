@@ -49,6 +49,7 @@ class ScriptTranslator : public Translator,
 
   string FormatPreedit(const string& preedit);
   string Spell(const Code& code);
+  string Reading(const Code& code);
   string GetPrecedingText(size_t start) const;
   bool UpdateElements(const CommitEntry& commit_entry);
 

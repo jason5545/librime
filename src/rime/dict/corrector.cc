@@ -590,6 +590,7 @@ Corrector* CorrectorComponent::Create(const Ticket& ticket) noexcept {
       config->GetString(ticket.name_space + "/key_model/abbreviations", &o.abbreviations);
       config->GetBool(ticket.name_space + "/key_model/require_tone", &o.require_tone);
       config->GetBool(ticket.name_space + "/key_model/fuzzy_untoned", &o.fuzzy_untoned);
+      config->GetBool(ticket.name_space + "/key_model/show_reading", &o.show_reading);
       config->GetDouble(ticket.name_space + "/key_model/valid", &o.valid);
       config->GetBool(ticket.name_space + "/key_model/valid_suggest", &o.valid_suggest);
       config->GetBool(ticket.name_space + "/key_model/closed_type", &o.closed_type);

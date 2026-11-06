@@ -99,6 +99,8 @@ class Corrector : public Class<Corrector, const Ticket&> {
   virtual bool ValidFirst() const { return false; }
   // 蓬萊：只修打了聲調的音節（例外是沒打聲調的模糊音，見 PenglaiKeyCorrector::Options::fuzzy_untoned）
   virtual bool RequiresTone() const { return false; }
+  // 蓬萊：修過的詞要不要在註解寫上修成的讀音
+  virtual bool ShowReading() const { return false; }
 };
 
 // 蓬萊：按鍵模型（照 Google 注音的做法：每一鍵都是機率，跟語言模型分數一起排）。
@@ -124,6 +126,8 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
     // 模糊音例外：沒打聲調也修（ㄈㄡ ㄓㄣ → 佛振）。只收只換了模糊音、聲母開頭又有韻母或介音、照打也是完整音節的；
     // 整串裡有單獨的聲母（只打首注音的打法）就不修
     bool fuzzy_untoned = true;
+    // 修過的詞在選字窗的註解寫上修成的讀音（佛振 ㄈㄛˊ ㄓㄣˋ）
+    bool show_reading = true;
     // 照打的那段本身就是完整音節時，容錯的機率再乘這個（換成另一個合法音節）
     double valid = 0.0001;
     // 照打合法的容錯不進整句，只當整段一個詞的建議（最多排第二）
@@ -154,6 +158,7 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
   bool ClosedType() const override { return options_.closed_type; }
   bool ValidFirst() const override { return options_.valid_first; }
   bool RequiresTone() const override { return options_.require_tone; }
+  bool ShowReading() const override { return options_.show_reading; }
   double ValidPenalty() const override {
     if (options_.valid <= 0)
       return -std::numeric_limits<double>::infinity();  // 照打合法時不修

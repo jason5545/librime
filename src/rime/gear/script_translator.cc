@@ -1282,6 +1282,14 @@ string ScriptTranslator::Spell(const Code& code) {
   return result;
 }
 
+// 蓬萊：詞典碼的讀音（音節之間空一格，不套 comment_format）
+string ScriptTranslator::Reading(const Code& code) {
+  vector<string> syllables;
+  if (!dict_ || !dict_->Decode(code, &syllables) || syllables.empty())
+    return string();
+  return boost::algorithm::join(syllables, " ");
+}
+
 string ScriptTranslator::GetPrecedingText(size_t start) const {
   if (!contextual_suggestions_)
     return string();
@@ -1941,6 +1949,15 @@ an<Candidate> ScriptTranslation::Peek() {
   }
   if (candidate_->preedit().empty()) {
     candidate_->set_preedit(syllabifier_->GetPreeditString(*candidate_));
+  }
+  // 蓬萊：按鍵模型修過的詞，註解寫上修成的讀音（照打的人看得出這個詞是改過的、改成什麼）
+  if (candidate_->comment().empty() && corrector_ && corrector_->Scored() &&
+      corrector_->ShowReading()) {
+    if (auto phrase = As<Phrase>(candidate_); phrase && phrase->correction()) {
+      auto reading = translator_->Reading(phrase->code());
+      if (!reading.empty())
+        candidate_->set_comment(reading);
+    }
   }
   if (candidate_->comment().empty()) {
     auto spelling = syllabifier_->GetOriginalSpelling(*candidate_);

@@ -283,6 +283,8 @@ int Syllabifier::BuildSyllableGraph(const string& input,
                   props.credibility += corrector_->ValidPenalty();
                   if (corrector_->ValidSuggest())
                     graph->weak.insert(std::make_tuple(current_pos, end_pos, syllable_id));
+                  if (corrector_->ValidSuggest() && !sc->second.closed)
+                    graph->weak_untoned.insert(std::make_tuple(current_pos, end_pos, syllable_id));
                 }
               } else {
                 props.is_correction = true;

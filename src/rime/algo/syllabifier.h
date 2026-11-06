@@ -205,6 +205,8 @@ struct SyllableGraph {
   SpellingIndices indices;
   // 蓬萊：按鍵模型「照打就是完整音節」那段的容錯邊（起點, 終點, 音節）：不進整句，只當整段一個詞的建議
   set<std::tuple<size_t, size_t, SyllableId>> weak;
+  // 蓬萊：其中沒打聲調的（模糊音）：只打首注音也可能長這樣，照打合法時修過的詞一律不搶第一（不管 valid_first）
+  set<std::tuple<size_t, size_t, SyllableId>> weak_untoned;
 };
 
 class Syllabifier {

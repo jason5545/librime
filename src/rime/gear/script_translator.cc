@@ -233,7 +233,8 @@ class ScriptSyllabifier : public PhraseSyllabifier {
   string GetOriginalSpelling(const Phrase& cand) const;
   bool IsCorrection(const Code& code, size_t code_length) const;
   // 蓬萊：這條路有沒有用到按鍵模型的建議邊（SyllableGraph::weak），從 start 到 end
-  bool UsesWeak(const Code& code, size_t start, size_t end) const;
+  bool UsesWeak(const Code& code, size_t start, size_t end,
+                bool untoned_only = false) const;
 
   const SyllableGraph& syllable_graph() const { return syllable_graph_; }
   // 蓬萊：建過幾次圖（ScriptTranslation::MainRow 的備忘照它判斷音節圖換過沒有）
@@ -1680,8 +1681,11 @@ bool ScriptSyllabifier::IsCorrection(const Code& code,
 
 bool ScriptSyllabifier::UsesWeak(const Code& code,
                                  size_t start,
-                                 size_t end) const {
-  if (syllable_graph_.weak.empty())
+                                 size_t end,
+                                 bool untoned_only) const {
+  const auto& weak =
+      untoned_only ? syllable_graph_.weak_untoned : syllable_graph_.weak;
+  if (weak.empty())
     return false;
   vector<std::tuple<size_t, size_t, SyllableId>> path;
   SyllabifyTask task{
@@ -1693,7 +1697,7 @@ bool ScriptSyllabifier::UsesWeak(const Code& code,
       [&](SyllabifyTask* task, size_t depth) { path.pop_back(); }};
   if (syllabify_dfs(&task, 0, start)) {
     for (const auto& e : path)
-      if (syllable_graph_.weak.count(e))
+      if (weak.count(e))
         return true;
   }
   return false;
@@ -2046,6 +2050,24 @@ iter_incremented:
     auto used = quota_used_.find(entry->code.size());
     return used != quota_used_.end() && used->second >= quota;
   };
+  // 蓬萊：沒打聲調的模糊音建議（照打合法時修過的詞）排在學習紀錄最前面時，先收著最後出。不收的話，下面
+  // 「用戶詞爲糾錯結果就免去優先權」會讓後面照打的學習紀錄（只打首注音的 ㄗ ㄨ 做完、在我）讓給詞典詞，
+  // 沒顯示的建議改了照打的順序。有打聲調的照舊（學過的修正詞照原本的規則排）
+  while (corrector_ && corrector_->Scored() && !syllabifier_->syllable_graph().weak_untoned.empty() &&
+         user_phrase_ && user_phrase_iter_ != user_phrase_->rend()) {
+    UserDictEntryIterator& uter = user_phrase_iter_->second;
+    if (uter.exhausted()) {
+      ++user_phrase_iter_;
+      continue;
+    }
+    const auto& entry = uter.Peek();
+    const size_t len = user_phrase_iter_->first;
+    if (!syllabifier_->UsesWeak(entry->code, 0, len, true))
+      break;
+    deferred_.push_back({entry, len, true});
+    if (!uter.Next())
+      ++user_phrase_iter_;
+  }
   size_t user_phrase_code_length = 0;
   if (user_phrase_ && user_phrase_iter_ != user_phrase_->rend()) {
     user_phrase_code_length = user_phrase_iter_->first;
@@ -2282,8 +2304,11 @@ void ScriptTranslation::PlaceCorrectionHead(size_t consumed) {
   const string context = translator_->GetPrecedingText(start_);
   const double head_score = poet_->Evaluate(context, *head, true);
   // 照打合法的那段換成別的（建議邊）不搶第一
-  const bool weak = !corrector_->ValidFirst() &&
-                    syllabifier_->UsesWeak(head->code, 0, consumed);
+  // 沒打聲調的模糊音建議（只打首注音也可能長這樣：ㄨㄛ ㄗ ㄚ 是「我在啊」）不管 valid_first 都不搶第一
+  const bool weak =
+      syllabifier_->UsesWeak(head->code, 0, consumed) &&
+      (!corrector_->ValidFirst() ||
+       syllabifier_->UsesWeak(head->code, 0, consumed, true));
   if (!weak && head_score >= sentences_.front()->weight()) {
     sentence_from_ = 1;
     return;

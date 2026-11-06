@@ -360,6 +360,7 @@ class ScriptTranslation : public Translation {
   void PlaceShortSentence(bool has_user_head);
   // 蓬萊：按鍵模型。整段剛好的詞是容錯來的（不算可靠，所以組了整句）：它的分數贏過最好的整句就排第一
   void PlaceCorrectionHead(size_t consumed);
+  bool LearnedSuggestion(const DictEntry& entry) const;
   size_t sentence_from_ = 0;  // 整句從第幾個候選起出（4D 沒贏時不是 0）
   bool HeadDone() const;
   an<Phrase> MakePhrase(const an<DictEntry>& entry,
@@ -2062,7 +2063,9 @@ iter_incremented:
     }
     const auto& entry = uter.Peek();
     const size_t len = user_phrase_iter_->first;
-    if (!syllabifier_->UsesWeak(entry->code, 0, len, true))
+    // 學過的詞（送出過、兩個音節以上）照學習紀錄排，不收著：佛振打過一次，下次 ㄈㄡ ㄓㄣ 就照學習紀錄往前
+    if (!syllabifier_->UsesWeak(entry->code, 0, len, true) ||
+        LearnedSuggestion(*entry))
       break;
     deferred_.push_back({entry, len, true});
     if (!uter.Next())
@@ -2280,6 +2283,12 @@ void ScriptTranslation::PlaceShortSentence(bool has_user_head) {
   sentence_from_ = static_cast<size_t>(position - 1);
 }
 
+// 蓬萊：學過的建議詞（學習紀錄裡送出過、兩個音節以上）。單音節不算：ㄗㄨ 修成 ㄓㄨ 的「住」平常就常打，
+// 只打首注音的 ㄗ ㄨ（做完）會被它換掉
+bool ScriptTranslation::LearnedSuggestion(const DictEntry& entry) const {
+  return entry.commit_count > 0 && entry.code.size() >= 2;
+}
+
 void ScriptTranslation::PlaceCorrectionHead(size_t consumed) {
   an<DictEntry> head;
   bool user_head = false;
@@ -2304,11 +2313,13 @@ void ScriptTranslation::PlaceCorrectionHead(size_t consumed) {
   const string context = translator_->GetPrecedingText(start_);
   const double head_score = poet_->Evaluate(context, *head, true);
   // 照打合法的那段換成別的（建議邊）不搶第一
-  // 沒打聲調的模糊音建議（只打首注音也可能長這樣：ㄨㄛ ㄗ ㄚ 是「我在啊」）不管 valid_first 都不搶第一
+  // 沒打聲調的模糊音建議（只打首注音也可能長這樣：ㄨㄛ ㄗ ㄚ 是「我在啊」）不管 valid_first 都不搶第一；
+  // 學過的（送出過、兩個音節以上）照 valid_first
   const bool weak =
       syllabifier_->UsesWeak(head->code, 0, consumed) &&
       (!corrector_->ValidFirst() ||
-       syllabifier_->UsesWeak(head->code, 0, consumed, true));
+       (syllabifier_->UsesWeak(head->code, 0, consumed, true) &&
+        !(user_head && LearnedSuggestion(*head))));
   if (!weak && head_score >= sentences_.front()->weight()) {
     sentence_from_ = 1;
     return;

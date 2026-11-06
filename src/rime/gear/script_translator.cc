@@ -1284,11 +1284,16 @@ string ScriptTranslator::Spell(const Code& code) {
   return result;
 }
 
-// 蓬萊：詞典碼的讀音（音節之間空一格，不套 comment_format）
+// 蓬萊：詞典碼的讀音（音節之間空一格，不套 comment_format）。英文的假音節（ㄋ~）不寫：整句裡夾著英文時只寫中文那幾個
 string ScriptTranslator::Reading(const Code& code) {
   vector<string> syllables;
   if (!dict_ || !dict_->Decode(code, &syllables) || syllables.empty())
     return string();
+  syllables.erase(std::remove_if(syllables.begin(), syllables.end(),
+                                 [](const string& s) {
+                                   return s.find('~') != string::npos;
+                                 }),
+                  syllables.end());
   return boost::algorithm::join(syllables, " ");
 }
 

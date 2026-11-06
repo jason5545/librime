@@ -2322,7 +2322,10 @@ void ScriptTranslation::PlaceCorrectionHead(size_t consumed) {
   if (phrase_ && phrase_iter_ != phrase_->rend() &&
       phrase_iter_->first == consumed && !phrase_iter_->second.exhausted()) {
     auto p = phrase_iter_->second.Peek();
-    if (!head || p->weight > head->weight) {
+    // 學過的建議詞（學習紀錄）優先當 head，不跟詞典詞比權重
+    const bool keep_user = user_head && LearnedSuggestion(*head) &&
+                           syllabifier_->IsCorrection(head->code, consumed);
+    if (!keep_user && (!head || p->weight > head->weight)) {
       head = p;
       user_head = false;
     }
@@ -2333,7 +2336,7 @@ void ScriptTranslation::PlaceCorrectionHead(size_t consumed) {
   if (!head)
     return;
   const string context = translator_->GetPrecedingText(start_);
-  const double head_score = poet_->Evaluate(context, *head, true);
+  double head_score = poet_->Evaluate(context, *head, true);
   // 照打合法的那段換成別的（建議邊）不搶第一
   // 照打合法時的建議：valid_first 關著不搶第一；沒打聲調的模糊音建議（只打首注音也可能長這樣：ㄨㄛ ㄗ ㄚ
   // 是「我在啊」）不管 valid_first 都不搶第一。學過的（學習紀錄送出過、兩個音節以上）照分數排，可以第一
@@ -2343,6 +2346,10 @@ void ScriptTranslation::PlaceCorrectionHead(size_t consumed) {
       !learned && syllabifier_->UsesWeak(head->code, 0, consumed) &&
       (!corrector_->ValidFirst() ||
        syllabifier_->UsesWeak(head->code, 0, consumed, true));
+  // 學過的建議詞：照打合法的扣分（ValidPenalty，打字的人多半要照打的）不算，學過就表示他要的是這個
+  if (learned && syllabifier_->UsesWeak(head->code, 0, consumed) &&
+      std::isfinite(corrector_->ValidPenalty()))
+    head_score -= corrector_->ValidPenalty();
   if (!weak && head_score >= sentences_.front()->weight()) {
     sentence_from_ = 1;
     return;

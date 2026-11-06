@@ -90,12 +90,15 @@ class Corrector : public Class<Corrector, const Ticket&> {
   // 蓬萊：容錯結果帶分數（Correction::score）、簡拼也能容錯
   virtual bool Scored() const { return false; }
   virtual bool CorrectsAbbreviations() const { return false; }
-  virtual bool AbbreviationAllows(unsigned ops) const { return false; }
+  // closed：這個拼法是照打的聲調鍵結尾（沒打聲調的完整音節在方案裡也算簡拼）
+  virtual bool AbbreviationAllows(unsigned ops, bool closed) const { return false; }
   // 蓬萊：照打的那段本身就是完整音節時，容錯再加的 log 分數（照打合法時多半就是要它）
   virtual double ValidPenalty() const { return 0.0; }
   virtual bool ValidSuggest() const { return false; }
   virtual bool ClosedType() const { return false; }
   virtual bool ValidFirst() const { return false; }
+  // 蓬萊：只修打了聲調的音節（例外是沒打聲調的模糊音，見 PenglaiKeyCorrector::Options::fuzzy_untoned）
+  virtual bool RequiresTone() const { return false; }
 };
 
 // 蓬萊：按鍵模型（照 Google 注音的做法：每一鍵都是機率，跟語言模型分數一起排）。
@@ -118,6 +121,9 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
     string abbreviations = "none";
     // 只修以照打的聲調鍵結尾的音節（看起來是打完整注音的地方）；只打第一個注音的輸入不碰
     bool require_tone = true;
+    // 模糊音例外：沒打聲調也修（ㄈㄡ ㄓㄣ → 佛振）。只收只換了模糊音、聲母開頭又有韻母或介音、照打也是完整音節的；
+    // 整串裡有單獨的聲母（只打首注音的打法）就不修
+    bool fuzzy_untoned = true;
     // 照打的那段本身就是完整音節時，容錯的機率再乘這個（換成另一個合法音節）
     double valid = 0.0001;
     // 照打合法的容錯不進整句，只當整段一個詞的建議（最多排第二）
@@ -147,6 +153,7 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
   bool ValidSuggest() const override { return options_.valid_suggest; }
   bool ClosedType() const override { return options_.closed_type; }
   bool ValidFirst() const override { return options_.valid_first; }
+  bool RequiresTone() const override { return options_.require_tone; }
   double ValidPenalty() const override {
     if (options_.valid <= 0)
       return -std::numeric_limits<double>::infinity();  // 照打合法時不修
@@ -155,8 +162,11 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
   bool CorrectsAbbreviations() const override {
     return options_.abbreviations != "none";
   }
-  // 這組錯能不能用在簡拼上
-  bool AbbreviationAllows(unsigned ops) const {
+  // 這組錯能不能用在簡拼上。沒打聲調、只換了模糊音的（fuzzy_untoned，ScoredSearch 只在拼法有韻母或介音時給）照收
+  bool AbbreviationAllows(unsigned ops, bool closed) const override {
+    if (!closed && ops == kOpFuzzy && options_.fuzzy_untoned &&
+        options_.require_tone)
+      return true;
     if (options_.abbreviations == "all")
       return !(ops & kOpOmission);
     if (options_.abbreviations == "double")
@@ -165,6 +175,7 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
   }
 
  private:
+  bool Untoned(unsigned ops, bool has_final) const;
   Options options_;
   // 打出 typed 鍵、本來要按的是 intended 鍵：每個 typed 鍵的候選（intended, log 機率）
   hash_map<char, vector<pair<char, double>>> substitutes_;

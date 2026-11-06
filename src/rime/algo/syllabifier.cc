@@ -6,6 +6,7 @@
 // 2012-02-11 GONG Chen <chen.sst@gmail.com>
 //
 #include <algorithm>
+#include <cstring>
 #include <queue>
 #include <boost/range/adaptor/reversed.hpp>
 #include <atomic>
@@ -170,8 +171,20 @@ int Syllabifier::BuildSyllableGraph(const string& input,
       for (auto& m : matches) {
         exact_match_syllables.insert({m.value, m.length});
         if (scored) {
+          // 沒打聲調的完整音節（ㄈㄡ）在方案裡是簡拼，也算照打合法：沒打聲調的模糊音容錯照樣只當建議。
+          // 認法：這段有聲母以外的注音鍵（大千鍵位），只打聲母、聲母加聲調的不算
+          bool untoned_full = false;
+          for (size_t k = 0; k < m.length; ++k) {
+            char ch = current_input[k];
+            if (!std::strchr("1qaz2wsxedcrfv5tgbyhn 6347", ch)) {
+              untoned_full = true;
+              break;
+            }
+          }
           for (auto a = prism.QuerySpelling(m.value); !a.exhausted(); a.Next()) {
-            if (a.properties().type == kNormalSpelling) {
+            auto type = a.properties().type;
+            if (type == kNormalSpelling ||
+                (untoned_full && type == kAbbreviation)) {
               exact_normal_lengths.insert(m.length);
               break;
             }
@@ -187,6 +200,11 @@ int Syllabifier::BuildSyllableGraph(const string& input,
         const auto& c = m.second;
         if (exact_match_syllables.count({c.syllable, c.length}))
           continue;
+        // 蓬萊：沒打聲調的模糊音只修照打本身也是完整音節的（ㄈㄡ → ㄈㄛ）。照打不成音節的多半是只打前兩個注音
+        // （ㄕ ㄛ 是「是哦」，不是 ㄕㄡ）
+        if (scored && !c.closed && corrector_->RequiresTone() &&
+            !exact_normal_lengths.count(c.length))
+          continue;
         // 蓬萊：照打的那段就是完整音節、設定成照打合法時不修
         if (scored && exact_normal_lengths.count(c.length) &&
             !std::isfinite(corrector_->ValidPenalty()))
@@ -198,7 +216,7 @@ int Syllabifier::BuildSyllableGraph(const string& input,
           if (props.is_correction)
             continue;
           bool ok = props.type == kNormalSpelling;
-          if (!ok && scored && corrector_->AbbreviationAllows(c.ops) &&
+          if (!ok && scored && corrector_->AbbreviationAllows(c.ops, c.closed) &&
               props.type <= kAbbreviation)
             ok = true;
           if (ok) {
@@ -255,7 +273,7 @@ int Syllabifier::BuildSyllableGraph(const string& input,
                 auto sc = scored_corrections.find(Corrections::Key(m.value, m.length));
                 if (sc == scored_corrections.end() || props.is_correction ||
                     (props.type != kNormalSpelling &&
-                     !corrector_->AbbreviationAllows(sc->second.ops))) {
+                     !corrector_->AbbreviationAllows(sc->second.ops, sc->second.closed))) {
                   accessor.Next();
                   continue;
                 }

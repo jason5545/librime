@@ -412,6 +412,13 @@ PenglaiKeyCorrector::PenglaiKeyCorrector(const Options& options)
   }
 }
 
+// 沒打聲調的音節收不收：require_tone 關著都收；開著時只收只換了模糊音、拼法裡有韻母或介音的
+bool PenglaiKeyCorrector::Untoned(unsigned ops, bool has_final) const {
+  if (!options_.require_tone)
+    return true;
+  return options_.fuzzy_untoned && ops == kOpFuzzy && has_final;
+}
+
 void PenglaiKeyCorrector::ToleranceSearch(const Prism& prism,
                                           const string& key,
                                           Corrections* results,
@@ -431,6 +438,17 @@ void PenglaiKeyCorrector::ScoredSearch(const Prism& prism,
   const auto& trie = prism.trie();
   const int max_edits = options_.max_edits;
   const double kFloor = -20.0;
+  // 沒打聲調的模糊音只在整串都是完整音節時修：有單獨的聲母（後面接聲母、聲調或結尾）就是只打首注音的打法，不碰
+  bool untoned_ok = true;
+  for (size_t i = 0; i < input.size(); ++i) {
+    if (!IsIn(kInitialKeys, input[i]))
+      continue;
+    char next = i + 1 < input.size() ? input[i + 1] : 0;
+    if (!next || IsIn(kInitialKeys, next) || IsIn(" 6347", next)) {
+      untoned_ok = false;
+      break;
+    }
+  }
   struct State {
     size_t node;
     size_t pos;  // 下一個要讀的輸入位置（整串輸入的索引）
@@ -441,9 +459,11 @@ void PenglaiKeyCorrector::ScoredSearch(const Prism& prism,
     bool omission;
     unsigned ops;
     bool closed;  // 最後一步是照打的聲調鍵
+    bool has_final;  // 拼法裡有聲母以外的注音（介音、韻母）
+    bool initial;    // 拼法的第一個鍵是聲母
   };
   vector<State> stack;
-  stack.push_back({0, begin, 0.0, 0, 0, -1, false, 0, false});
+  stack.push_back({0, begin, 0.0, 0, 0, -1, false, 0, false, false, false});
   map<pair<size_t, size_t>, double> best;  // (節點, 位置) → 最佳分數（同樣錯幾次以內）
 
   auto step = [&](const State& from, char c, size_t next_pos, double cost,
@@ -458,11 +478,12 @@ void PenglaiKeyCorrector::ScoredSearch(const Prism& prism,
     State s{node, next_pos, from.score + cost,
             from.edits + (cost < 0 ? 1 : 0), from.depth + 1,
             static_cast<int>(val >= 0 ? val : -1), from.omission || omission,
-            from.ops | op, op == 0 && IsIn(" 6347", c)};
+            from.ops | op, op == 0 && IsIn(" 6347", c),
+            from.has_final || (!IsIn(kInitialKeys, c) && !IsIn(" 6347", c)),
+            from.depth == 0 ? IsIn(kInitialKeys, c) : from.initial};
     if (s.edits > max_edits || s.score < kFloor)
       return;
-    if (val >= 0 && s.edits > 0 &&
-        (s.closed || !options_.require_tone)) {
+    if (val >= 0 && s.edits > 0 && (s.closed || (untoned_ok && Untoned(s.ops, s.has_final && s.initial)))) {
       Correction c{static_cast<size_t>(s.edits), static_cast<SyllableId>(val),
                    s.pos - begin, s.score, true};
       c.closed = s.closed;
@@ -512,7 +533,7 @@ void PenglaiKeyCorrector::ScoredSearch(const Prism& prism,
             // 多按的那一鍵在拼法最後（ㄐㄐ 當一個 ㄐ）：剛走到的節點就是拼法。
             // 多按的是聲調鍵（ˋˋ）時，前一步照打的聲調鍵還算數
             if (is_double && st.value >= 0 &&
-                (st.closed || !options_.require_tone)) {
+                (st.closed || (untoned_ok && Untoned(s.ops, st.has_final && st.initial)))) {
               Correction c{static_cast<size_t>(s.edits),
                            static_cast<SyllableId>(st.value), s.pos - begin,
                            s.score, true};
@@ -568,6 +589,7 @@ Corrector* CorrectorComponent::Create(const Ticket& ticket) noexcept {
       config->GetInt(ticket.name_space + "/key_model/max_edits", &o.max_edits);
       config->GetString(ticket.name_space + "/key_model/abbreviations", &o.abbreviations);
       config->GetBool(ticket.name_space + "/key_model/require_tone", &o.require_tone);
+      config->GetBool(ticket.name_space + "/key_model/fuzzy_untoned", &o.fuzzy_untoned);
       config->GetDouble(ticket.name_space + "/key_model/valid", &o.valid);
       config->GetBool(ticket.name_space + "/key_model/valid_suggest", &o.valid_suggest);
       config->GetBool(ticket.name_space + "/key_model/closed_type", &o.closed_type);

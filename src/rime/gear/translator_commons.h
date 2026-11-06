@@ -83,6 +83,9 @@ class Phrase : public Candidate {
   // 蓬萊：按鍵模型容錯來的詞（前文重排不讓它搶走照打的第一個）
   bool correction() const { return correction_; }
   void set_correction(bool c) { correction_ = c; }
+  // 蓬萊：修過的那段是沒打聲調的模糊音建議（只打首注音也可能長這樣；外掛的 Voco 重排看它）
+  bool untoned_correction() const { return untoned_correction_; }
+  void set_untoned_correction(bool c) { untoned_correction_ = c; }
   Code& code() const { return entry_->code; }
   const DictEntry& entry() const { return *entry_; }
   const Language* language() const { return language_; }
@@ -113,6 +116,7 @@ class Phrase : public Candidate {
   an<DictEntry> entry_;
   an<PhraseSyllabifier> syllabifier_;
   bool correction_ = false;
+  bool untoned_correction_ = false;
 };
 
 //

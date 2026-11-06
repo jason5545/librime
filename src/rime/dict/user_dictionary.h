@@ -10,6 +10,7 @@
 #include <time.h>
 #include <rime/common.h>
 #include <rime/component.h>
+#include <algorithm>
 #include <rime/dict/user_db.h>
 #include <rime/dict/vocabulary.h>
 
@@ -29,6 +30,12 @@ class UserDictEntryIterator : public DictEntryFilterBinder {
   bool exhausted() const { return index_ >= cache_.size(); }
   size_t cache_size() const { return cache_.size(); }
   // 蓬萊：還沒出的詞條（照過濾器）逐一交給 f，不移動位置（候選排序挑最近打過的詞用）
+  // 蓬萊：還沒出的詞條照 pred 穩定分成兩段，pred 為 false 的在前（沒打聲調的模糊音建議排到照打的後面）
+  template <class P>
+  void StablePartitionRemaining(P&& pred) {
+    std::stable_partition(cache_.begin() + index_, cache_.end(),
+                          [&](const an<DictEntry>& e) { return !pred(e); });
+  }
   template <class F>
   void ForEachRemaining(F&& f) const {
     for (size_t i = index_; i < cache_.size(); ++i)

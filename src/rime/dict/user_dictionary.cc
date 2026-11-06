@@ -26,6 +26,18 @@
 
 namespace rime {
 
+// 同一個音節有好幾條邊（索引裡長的在前）時，原本只看第一條、後面是簡拼的跳過。蓬萊：按鍵模型的容錯邊
+// （例如 ㄓㄨㄣ 修成 ㄓㄨㄥ 那條 0→3）不算「第一條」：不然照打的簡拼邊（ㄓ 那條 0→1）會被它擠掉，
+// 只打首注音的 ㄓ ㄨㄣ ㄉㄜ˙ 查不到學過的「中文的」。照打的邊照自己的順序算，容錯邊照原本的規則
+static bool SkipShorterAbbreviation(const EdgeProperties& props,
+                                    size_t i,
+                                    size_t* exact) {
+  if (props.is_correction)
+    return i > 0 && props.type >= kAbbreviation;
+  return (*exact)++ > 0 && props.type >= kAbbreviation;
+}
+
+
 struct DfsState {
   size_t watermark = 0;  // 蓬萊：讀過的最遠位置
   size_t depth_limit;
@@ -467,9 +479,9 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
         present_index = found;
       } else {
         if (!spelling.second.empty()) {  // 沒有邊時原本不 Jump，讀取位置不動
-          for (size_t i = 0; i < spelling.second.size(); ++i) {
+          for (size_t i = 0, exact = 0; i < spelling.second.size(); ++i) {
             auto props = spelling.second[i];
-            if (i > 0 && props->type >= kAbbreviation)
+            if (SkipShorterAbbreviation(*props, i, &exact))
               continue;
             if (props->end_pos > state->watermark)
               state->watermark = props->end_pos;
@@ -546,9 +558,9 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
     // 蓬萊：等於 TranslateCodeToString(state->code, &prefix)，只是從上一層的前綴往後接
     if (!AppendSyllableToPrefix(spelling.first, current_prefix, &prefix))
       continue;
-    for (size_t i = 0; i < spelling.second.size(); ++i) {
+    for (size_t i = 0, exact = 0; i < spelling.second.size(); ++i) {
       auto props = spelling.second[i];
-      if (i > 0 && props->type >= kAbbreviation)
+      if (SkipShorterAbbreviation(*props, i, &exact))
         continue;
       state->credibility.push_back(state->credibility.back() +
                                    props->credibility);

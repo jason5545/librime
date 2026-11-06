@@ -1770,6 +1770,17 @@ bool ScriptTranslation::Evaluate(Dictionary* dict, UserDictionary* user_dict) {
   if (!phrase_ && !user_phrase_)
     return false;
 
+  // 蓬萊：學習紀錄裡沒打聲調的模糊音建議排到同長度照打的學習紀錄後面：學過的建議（佛振）還是比詞典詞前面，
+  // 但不搶照打的學習紀錄（只打首注音的 ㄓ ㄨㄣ ㄉㄜ˙ 是「中文的」，不是學過的「中的」）
+  if (user_phrase_ && corrector_ && corrector_->Scored() &&
+      !syllable_graph.weak_untoned.empty()) {
+    for (auto& x : *user_phrase_) {
+      const size_t len = x.first;
+      x.second.StablePartitionRemaining([&](const an<DictEntry>& e) {
+        return syllabifier_->UsesWeak(e->code, 0, len, true);
+      });
+    }
+  }
   if (phrase_)
     phrase_iter_ = phrase_->rbegin();
   if (user_phrase_)
@@ -1960,19 +1971,25 @@ an<Candidate> ScriptTranslation::Peek() {
   if (candidate_->preedit().empty()) {
     candidate_->set_preedit(syllabifier_->GetPreeditString(*candidate_));
   }
-  // 蓬萊：按鍵模型修過的詞，註解寫上修成的讀音（照打的人看得出這個詞是改過的、改成什麼）
-  if (candidate_->comment().empty() && corrector_ && corrector_->Scored() &&
-      corrector_->ShowReading()) {
-    // 整句沒有 correction 旗標：照整句的碼在音節圖上找一次路徑，有修過的音節就算
-    auto phrase = As<Phrase>(candidate_);
-    bool corrected = phrase && phrase->correction();
-    if (phrase && !corrected && As<Sentence>(candidate_))
-      corrected = syllabifier_->IsCorrection(phrase->code(),
-                                             phrase->end() - phrase->start());
-    if (corrected) {
-      auto reading = translator_->Reading(phrase->code());
-      if (!reading.empty())
-        candidate_->set_comment(reading);
+  // 蓬萊：按鍵模型修過的詞，註解寫上修成的讀音（照打的人看得出這個詞是改過的、改成什麼）；
+  // 修的那段是沒打聲調的模糊音建議時另外標起來（外掛的 Voco 重排不讓它參加）
+  if (corrector_ && corrector_->Scored()) {
+    if (auto phrase = As<Phrase>(candidate_)) {
+      // 整句沒有 correction 旗標：照整句的碼在音節圖上找一次路徑，有修過的音節就算
+      bool corrected = phrase->correction();
+      if (!corrected && As<Sentence>(candidate_))
+        corrected = syllabifier_->IsCorrection(phrase->code(),
+                                               phrase->end() - phrase->start());
+      if (corrected) {
+        if (phrase->start() == start_)
+          phrase->set_untoned_correction(syllabifier_->UsesWeak(
+              phrase->code(), 0, phrase->end() - phrase->start(), true));
+        if (candidate_->comment().empty() && corrector_->ShowReading()) {
+          auto reading = translator_->Reading(phrase->code());
+          if (!reading.empty())
+            candidate_->set_comment(reading);
+        }
+      }
     }
   }
   if (candidate_->comment().empty()) {
@@ -2318,13 +2335,14 @@ void ScriptTranslation::PlaceCorrectionHead(size_t consumed) {
   const string context = translator_->GetPrecedingText(start_);
   const double head_score = poet_->Evaluate(context, *head, true);
   // 照打合法的那段換成別的（建議邊）不搶第一
-  // 沒打聲調的模糊音建議（只打首注音也可能長這樣：ㄨㄛ ㄗ ㄚ 是「我在啊」）不管 valid_first 都不搶第一；
-  // 學過的（送出過、兩個音節以上）照 valid_first
+  // 照打合法時的建議：valid_first 關著不搶第一；沒打聲調的模糊音建議（只打首注音也可能長這樣：ㄨㄛ ㄗ ㄚ
+  // 是「我在啊」）不管 valid_first 都不搶第一。學過的（學習紀錄送出過、兩個音節以上）照分數排，可以第一
+  // （Jason 11/6：學習紀錄優先）
+  const bool learned = user_head && LearnedSuggestion(*head);
   const bool weak =
-      syllabifier_->UsesWeak(head->code, 0, consumed) &&
+      !learned && syllabifier_->UsesWeak(head->code, 0, consumed) &&
       (!corrector_->ValidFirst() ||
-       (syllabifier_->UsesWeak(head->code, 0, consumed, true) &&
-        !(user_head && LearnedSuggestion(*head))));
+       syllabifier_->UsesWeak(head->code, 0, consumed, true));
   if (!weak && head_score >= sentences_.front()->weight()) {
     sentence_from_ = 1;
     return;

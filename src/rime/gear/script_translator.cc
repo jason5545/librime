@@ -3142,7 +3142,10 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
   for (const auto& span : lattice->spans()) {
     if (left <= 0 || keylid_.size() >= max_keylid)
       break;
-    if (known.count({span.start, span.end}))
+    // 1. 的英文段把後面緊接的空白算進去了（english_space），比對時也照算
+    const bool spaced = translator_->english_space() && span.end < n &&
+                        input_[span.end] == ' ';
+    if (known.count({span.start, span.end + (spaced ? 1 : 0)}))
       continue;
     --left;
     auto path = lattice->Path(span);
@@ -3158,6 +3161,11 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
       else
         config.push_back(
             {seg.first, seg.second, translator_->english_min_zipf(), false});
+      // 英文段後面緊接空白（english_space）：跟 1. 一樣把空白算進這段，不然那個空白單獨成一段中文、
+      // 整句組不出來（modifier key：modifier 後面的空白）
+      auto& s = config.back();
+      if (translator_->english_space() && s.end < n && input_[s.end] == ' ')
+        s.end = s.end + 1;
     }
     bool all_in_first = !readings.empty();
     for (const auto& s : config) {

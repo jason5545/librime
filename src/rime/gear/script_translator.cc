@@ -1953,7 +1953,13 @@ an<Candidate> ScriptTranslation::Peek() {
   // 蓬萊：按鍵模型修過的詞，註解寫上修成的讀音（照打的人看得出這個詞是改過的、改成什麼）
   if (candidate_->comment().empty() && corrector_ && corrector_->Scored() &&
       corrector_->ShowReading()) {
-    if (auto phrase = As<Phrase>(candidate_); phrase && phrase->correction()) {
+    // 整句沒有 correction 旗標：照整句的碼在音節圖上找一次路徑，有修過的音節就算
+    auto phrase = As<Phrase>(candidate_);
+    bool corrected = phrase && phrase->correction();
+    if (phrase && !corrected && As<Sentence>(candidate_))
+      corrected = syllabifier_->IsCorrection(phrase->code(),
+                                             phrase->end() - phrase->start());
+    if (corrected) {
       auto reading = translator_->Reading(phrase->code());
       if (!reading.empty())
         candidate_->set_comment(reading);

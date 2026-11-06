@@ -438,16 +438,27 @@ void PenglaiKeyCorrector::ScoredSearch(const Prism& prism,
   const auto& trie = prism.trie();
   const int max_edits = options_.max_edits;
   const double kFloor = -20.0;
-  // 沒打聲調的模糊音只在整串都是完整音節時修：有單獨的聲母（後面接聲母、聲調或結尾）就是只打首注音的打法，不碰
+  // 沒打聲調的模糊音只在整串都是完整音節時修，下面兩種是只打首注音的打法，看到就不碰：
+  // 單獨的聲母（後面接聲母、聲調或結尾）；單獨一個介音或韻母的零聲母字（開頭、聲調後或韻母後的一個鍵，
+  // 後面接聲母或結尾：ㄨ ㄗ ㄚ 是「我在啊」，ㄗㄚ 不是一個音節）。打完整注音時「一」「啊」這種一個鍵的字
+  // 也會被當成首注音、不修，只是少修，不會修錯
   bool untoned_ok = true;
-  for (size_t i = 0; i < input.size(); ++i) {
-    if (!IsIn(kInitialKeys, input[i]))
-      continue;
+  for (size_t i = 0; i < input.size() && untoned_ok; ++i) {
+    char c = input[i];
     char next = i + 1 < input.size() ? input[i + 1] : 0;
-    if (!next || IsIn(kInitialKeys, next) || IsIn(" 6347", next)) {
-      untoned_ok = false;
-      break;
+    bool next_starts = !next || IsIn(kInitialKeys, next);
+    if (IsIn(kInitialKeys, c)) {
+      if (!next || IsIn(kInitialKeys, next) || IsIn(" 6347", next))
+        untoned_ok = false;
+      continue;
     }
+    if (IsIn(" 6347", c) || !next_starts)
+      continue;
+    char prev = i > 0 ? input[i - 1] : 0;
+    bool prev_ends = !prev || IsIn(" 6347", prev) ||
+                     (!IsIn(kInitialKeys, prev) && !IsIn(kMedialKeys, prev));
+    if (prev_ends)
+      untoned_ok = false;
   }
   struct State {
     size_t node;

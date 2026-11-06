@@ -554,24 +554,25 @@ Corrector* CorrectorComponent::Create(const Ticket& ticket) noexcept {
   if (ticket.schema) {
     Config* config = ticket.schema->config();
     bool enabled = false;
-    string ns = ticket.name_space + "/key_model";
-    if (config->GetBool(ns + "/enable", &enabled) && enabled) {
+    // 蓬萊：鍵名寫全（tools/gen_settings_catalog.py 照「ticket.name_space + "/…"」掃設定鍵）
+    if (config->GetBool(ticket.name_space + "/key_model/enable", &enabled) &&
+        enabled) {
       PenglaiKeyCorrector::Options o;
-      config->GetDouble(ns + "/substitution", &o.substitution);
-      config->GetDouble(ns + "/sigma", &o.sigma);
-      config->GetDouble(ns + "/extra", &o.extra);
-      config->GetDouble(ns + "/double_press", &o.double_press);
-      config->GetDouble(ns + "/omit_initial", &o.omit_initial);
-      config->GetDouble(ns + "/omit_medial", &o.omit_medial);
-      config->GetDouble(ns + "/fuzzy", &o.fuzzy);
-      config->GetInt(ns + "/max_edits", &o.max_edits);
-      config->GetString(ns + "/abbreviations", &o.abbreviations);
-      config->GetBool(ns + "/require_tone", &o.require_tone);
-      config->GetDouble(ns + "/valid", &o.valid);
-      config->GetBool(ns + "/valid_suggest", &o.valid_suggest);
-      config->GetBool(ns + "/closed_type", &o.closed_type);
-      config->GetBool(ns + "/valid_first", &o.valid_first);
-      if (auto list = config->GetList(ns + "/fuzzy_pairs")) {
+      config->GetDouble(ticket.name_space + "/key_model/substitution", &o.substitution);
+      config->GetDouble(ticket.name_space + "/key_model/sigma", &o.sigma);
+      config->GetDouble(ticket.name_space + "/key_model/extra", &o.extra);
+      config->GetDouble(ticket.name_space + "/key_model/double_press", &o.double_press);
+      config->GetDouble(ticket.name_space + "/key_model/omit_initial", &o.omit_initial);
+      config->GetDouble(ticket.name_space + "/key_model/omit_medial", &o.omit_medial);
+      config->GetDouble(ticket.name_space + "/key_model/fuzzy", &o.fuzzy);
+      config->GetInt(ticket.name_space + "/key_model/max_edits", &o.max_edits);
+      config->GetString(ticket.name_space + "/key_model/abbreviations", &o.abbreviations);
+      config->GetBool(ticket.name_space + "/key_model/require_tone", &o.require_tone);
+      config->GetDouble(ticket.name_space + "/key_model/valid", &o.valid);
+      config->GetBool(ticket.name_space + "/key_model/valid_suggest", &o.valid_suggest);
+      config->GetBool(ticket.name_space + "/key_model/closed_type", &o.closed_type);
+      config->GetBool(ticket.name_space + "/key_model/valid_first", &o.valid_first);
+      if (auto list = config->GetList(ticket.name_space + "/key_model/fuzzy_pairs")) {
         for (size_t i = 0; i < list->size(); ++i) {
           if (auto v = list->GetValueAt(i))
             o.fuzzy_pairs.push_back(v->str());

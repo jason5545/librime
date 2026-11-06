@@ -111,17 +111,17 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
     double double_press = 0.01;   // 同一個鍵連按兩下
     double omit_initial = 0.003;  // 漏打聲母
     double omit_medial = 0.003;   // 漏打介音（ㄧㄨㄩ）
-    double fuzzy = 0.0;           // 模糊音（fuzzy_pairs 裡的每一對）
+    double fuzzy = 0.01;          // 模糊音（fuzzy_pairs 裡的每一對；沒寫清單就沒有）
     vector<string> fuzzy_pairs;   // 注音兩兩一對，例如 ㄣㄥ
-    int max_edits = 2;
+    int max_edits = 1;            // 一個音節最多錯幾次
     // 簡拼（只打第一個注音）收哪幾種錯：none（預設）、double（只收連按兩下）、all
     string abbreviations = "none";
     // 只修以照打的聲調鍵結尾的音節（看起來是打完整注音的地方）；只打第一個注音的輸入不碰
     bool require_tone = true;
     // 照打的那段本身就是完整音節時，容錯的機率再乘這個（換成另一個合法音節）
-    double valid = 1.0;
+    double valid = 0.0001;
     // 照打合法的容錯不進整句，只當整段一個詞的建議（最多排第二）
-    bool valid_suggest = false;
+    bool valid_suggest = true;
     // 修好的完整音節當成照打的完整音節算類型（會剪掉同一段的簡拼讀法）
     bool closed_type = false;
     // 照打合法時的建議詞（整段一個詞）分數贏過最好的整句時可以排第一；預設不行，最多排第二

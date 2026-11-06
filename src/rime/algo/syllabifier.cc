@@ -11,6 +11,9 @@
 #include <atomic>
 #include <new>
 #include <rime/algo/syllabifier.h>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <rime/dict/corrector.h>
 #include <rime/dict/prism.h>
 #include "syllabifier.h"
@@ -154,22 +157,59 @@ int Syllabifier::BuildSyllableGraph(const string& input,
 
     // see where we can go by advancing a syllable
     vector<Prism::Match> matches;
-    set<SyllableId> exact_match_syllables;
+    // 蓬萊：完全照打的拼法記（拼法, 長度）：按鍵模型的多按一下會讓同一個拼法吃不同長度
+    set<pair<SyllableId, size_t>> exact_match_syllables;
+    // 蓬萊：按鍵模型的容錯分數，key 是 Corrections::Key（拼法, 長度）
+    hash_map<uint64_t, Correction> scored_corrections;
     auto current_input = input.substr(begin_pos);
     prism.CommonPrefixSearch(current_input, &matches);
+    const bool scored = corrector_ && corrector_->Scored();
+    // 蓬萊：照打就有完整音節的長度（按鍵模型：這種長度的容錯另外扣 ValidPenalty）
+    set<size_t> exact_normal_lengths;
     if (corrector_) {
       for (auto& m : matches) {
-        exact_match_syllables.insert(m.value);
+        exact_match_syllables.insert({m.value, m.length});
+        if (scored) {
+          for (auto a = prism.QuerySpelling(m.value); !a.exhausted(); a.Next()) {
+            if (a.properties().type == kNormalSpelling) {
+              exact_normal_lengths.insert(m.length);
+              break;
+            }
+          }
+        }
       }
       Corrections corrections;
-      corrector_->ToleranceSearch(prism, current_input, &corrections, 5);
+      if (scored)
+        corrector_->ScoredSearch(prism, input, begin_pos, &corrections);
+      else
+        corrector_->ToleranceSearch(prism, current_input, &corrections, 5);
       for (const auto& m : corrections) {
-        for (auto accessor = prism.QuerySpelling(m.first);
+        const auto& c = m.second;
+        if (exact_match_syllables.count({c.syllable, c.length}))
+          continue;
+        // 蓬萊：照打的那段就是完整音節、設定成照打合法時不修
+        if (scored && exact_normal_lengths.count(c.length) &&
+            !std::isfinite(corrector_->ValidPenalty()))
+          continue;
+        for (auto accessor = prism.QuerySpelling(c.syllable);
              !accessor.exhausted(); accessor.Next()) {
           auto props = accessor.properties();
-          Glue(m.first, &props);
-          if (props.type == kNormalSpelling && !props.is_correction) {
-            matches.push_back({m.first, m.second.length});
+          Glue(c.syllable, &props);
+          if (props.is_correction)
+            continue;
+          bool ok = props.type == kNormalSpelling;
+          if (!ok && scored && corrector_->AbbreviationAllows(c.ops) &&
+              props.type <= kAbbreviation)
+            ok = true;
+          if (ok) {
+            matches.push_back({c.syllable, c.length});
+            if (scored)
+              scored_corrections[m.first] = c;
+            static const bool km_debug = std::getenv("PENGLAI_KM_DEBUG") != nullptr;
+            if (scored && km_debug)
+              fprintf(stderr, "km %zu+%zu spell=%d type=%d ops=%u score=%.2f cred=%.2f\n",
+                      begin_pos, c.length, c.syllable, (int)props.type, c.ops,
+                      c.score, props.credibility);
             break;
           }
         }
@@ -208,14 +248,41 @@ int Syllabifier::BuildSyllableGraph(const string& input,
             props.end_pos = end_pos;
             // add a syllable with properties to the edge's
             // spelling-to-syllable map
-            if (corrector_ && exact_match_syllables.find(m.value) ==
-                                  exact_match_syllables.end()) {
-              props.is_correction = true;
-              props.credibility = kCorrectionCredibility;
+            if (corrector_ && !exact_match_syllables.count({m.value, m.length})) {
+              if (scored) {
+                // 蓬萊：按鍵模型的分數加在拼法原本的分數上（簡拼的扣分照扣）；補了漏打的鍵只給完整音節；
+                // 簡拼不容錯時只給完整音節
+                auto sc = scored_corrections.find(Corrections::Key(m.value, m.length));
+                if (sc == scored_corrections.end() || props.is_correction ||
+                    (props.type != kNormalSpelling &&
+                     !corrector_->AbbreviationAllows(sc->second.ops))) {
+                  accessor.Next();
+                  continue;
+                }
+                props.is_correction = true;
+                props.credibility += sc->second.score;
+                if (exact_normal_lengths.count(m.length)) {
+                  props.credibility += corrector_->ValidPenalty();
+                  if (corrector_->ValidSuggest())
+                    graph->weak.insert(std::make_tuple(current_pos, end_pos, syllable_id));
+                }
+              } else {
+                props.is_correction = true;
+                props.credibility = kCorrectionCredibility;
+              }
             }
             // let end_vertex_type be the best (smaller) type of spelling
             // that ends at the vertex
-            if (end_vertex_type > props.type && !props.is_correction) {
+            // 蓬萊：按鍵模型修好的完整音節（以照打的聲調鍵結尾）當成照打的完整音節算類型
+            bool closed_correction = false;
+            if (scored && props.is_correction && corrector_->ClosedType()) {
+              auto sc = scored_corrections.find(Corrections::Key(m.value, m.length));
+              closed_correction = sc != scored_corrections.end() &&
+                                  sc->second.closed &&
+                                  props.type == kNormalSpelling;
+            }
+            if (end_vertex_type > props.type &&
+                (!props.is_correction || closed_correction)) {
               end_vertex_type = props.type;
             }
             if (!collected.empty() && collected.back().first >= syllable_id)
@@ -323,7 +390,11 @@ int Syllabifier::BuildSyllableGraph(const string& input,
         ++j;
       }
     }
-    if (graph->vertices[i] > last_type || graph->edges[i].empty()) {
+    // 蓬萊：按鍵模型的容錯邊不參與決定音節類型，只靠容錯走得到的點類型是 kInvalidSpelling，不因為類型被刪
+    bool correction_only = corrector_ && corrector_->Scored() &&
+                           graph->vertices[i] == kInvalidSpelling;
+    if ((graph->vertices[i] > last_type && !correction_only) ||
+        graph->edges[i].empty()) {
       DLOG(INFO) << "remove stale vertex at " << i;
       graph->vertices.erase(i);
       graph->edges.erase(i);

@@ -8,6 +8,7 @@
 #define RIME_DICTIONARY_H_
 
 #include <rime_api.h>
+#include <functional>
 #include <rime/common.h>
 #include <rime/component.h>
 #include <rime/dict/prism.h>
@@ -40,6 +41,8 @@ class RIME_DLL DictEntryIterator : public DictEntryFilterBinder {
   bool Skip(size_t num_entries);
   bool exhausted() const;
   size_t entry_count() const { return entry_count_; }
+  // 蓬萊：還有詞沒出的碼（一個 chunk 一個碼；第二個參數是不是聯想補完）逐一交給 f，有一個回 true 就回 true；不移動位置
+  bool AnyRemainingCode(const std::function<bool(const Code&, bool)>& f) const;
 
  protected:
   bool FindNextEntry();

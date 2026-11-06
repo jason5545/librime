@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <boost/container/flat_map.hpp>
 #include <rime_api.h>
+#include <tuple>
 #include <rime/common.h>
 #include "spelling.h"
 
@@ -202,6 +203,8 @@ struct SyllableGraph {
   VertexMap vertices;
   EdgeMap edges;
   SpellingIndices indices;
+  // 蓬萊：按鍵模型「照打就是完整音節」那段的容錯邊（起點, 終點, 音節）：不進整句，只當整段一個詞的建議
+  set<std::tuple<size_t, size_t, SyllableId>> weak;
 };
 
 class Syllabifier {

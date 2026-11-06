@@ -56,7 +56,25 @@ void ContextualTranslation::AppendToCache(vector<of<Phrase>>& queue) {
   if (queue.empty())
     return;
   DLOG(INFO) << "appending to cache " << queue.size() << " candidates.";
-  std::sort(queue.begin(), queue.end(), compare_by_weight_desc);
+  // 蓬萊：按鍵模型。最前面那一組（前面沒有整句）原本第一個是照打的詞時，重排之後第一個還是照打的：
+  // 容錯的詞可以排第二以後，不搶第一（ScriptTranslation 已經把照打的排到第一個）
+  const bool any_correction =
+      std::any_of(queue.begin(), queue.end(),
+                  [](const an<Phrase>& p) { return p->correction(); });
+  if (!any_correction) {
+    std::sort(queue.begin(), queue.end(), compare_by_weight_desc);
+    std::copy(queue.begin(), queue.end(), std::back_inserter(cache_));
+    queue.clear();
+    return;
+  }
+  const bool head_exact = cache_.empty() && !queue.front()->correction();
+  std::stable_sort(queue.begin(), queue.end(), compare_by_weight_desc);
+  if (head_exact && queue.front()->correction()) {
+    auto it = std::find_if(queue.begin(), queue.end(),
+                           [](const an<Phrase>& p) { return !p->correction(); });
+    if (it != queue.end())
+      std::rotate(queue.begin(), it, it + 1);
+  }
   std::copy(queue.begin(), queue.end(), std::back_inserter(cache_));
   queue.clear();
 }

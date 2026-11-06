@@ -7,8 +7,12 @@
 
 #include "corrector.h"
 #include <algorithm>
+#include <cmath>
+#include <cstring>
+#include <limits>
 #include <numeric>
 #include <queue>
+#include <rime/config.h>
 #include <rime/schema.h>
 #include <rime/service.h>
 #include <rime/ticket.h>
@@ -298,7 +302,284 @@ CorrectorComponent::CorrectorComponent()
     : resolver_(Service::instance().CreateDeployedResourceResolver(
           {"corrector", "", ".correction.bin"})) {}
 
+// 蓬萊：按鍵模型 ------------------------------------------------------------
+
+namespace {
+
+// 美式鍵盤（ANSI）上的鍵中心，鍵寬為 1。數字列 1 在 x=1；QWERTY 列往右錯 0.5、ASDF 列 0.75、ZXCV 列 1.25
+struct KeyPos {
+  char ch;
+  double x, y;
+};
+const vector<KeyPos>& KeyPositions() {
+  static const vector<KeyPos> positions = [] {
+    vector<KeyPos> v;
+    const char* rows[] = {"1234567890-=", "qwertyuiop[]\\", "asdfghjkl;'",
+                          "zxcvbnm,./"};
+    const double offsets[] = {1.0, 1.5, 1.75, 2.25};
+    for (int r = 0; r < 4; ++r) {
+      const char* row = rows[r];
+      for (int c = 0; row[c]; ++c)
+        v.push_back({row[c], offsets[r] + c, static_cast<double>(r)});
+    }
+    return v;
+  }();
+  return positions;
+}
+
+// 大千鍵位：注音 → 鍵（tools/zhuyin.py 的 ZY、KEY）
+const char* const kZhuyin[] = {
+    "ㄅ", "ㄆ", "ㄇ", "ㄈ", "ㄉ", "ㄊ", "ㄋ", "ㄌ", "ㄍ", "ㄎ", "ㄏ", "ㄐ", "ㄑ",
+    "ㄒ", "ㄓ", "ㄔ", "ㄕ", "ㄖ", "ㄗ", "ㄘ", "ㄙ", "ㄧ", "ㄨ", "ㄩ", "ㄚ", "ㄛ",
+    "ㄜ", "ㄝ", "ㄞ", "ㄟ", "ㄠ", "ㄡ", "ㄢ", "ㄣ", "ㄤ", "ㄥ", "ㄦ"};
+const char kZhuyinKeys[] = "1qaz2wsxedcrfv5tgbyhnujm8ik,9ol.0p;/-";
+const char kInitialKeys[] = "1qaz2wsxedcrfv5tgbyhn";
+const char kMedialKeys[] = "ujm";
+
+bool IsIn(const char* set, char c) {
+  return c && std::strchr(set, c) != nullptr;
+}
+
+// 一個注音字串（UTF-8）拆成鍵；認不得的回空字串
+string ZhuyinToKeys(const string& zhuyin) {
+  string keys;
+  size_t i = 0;
+  while (i < zhuyin.size()) {
+    bool found = false;
+    for (size_t z = 0; z < sizeof(kZhuyin) / sizeof(kZhuyin[0]); ++z) {
+      size_t len = std::strlen(kZhuyin[z]);
+      if (zhuyin.compare(i, len, kZhuyin[z]) == 0) {
+        keys += kZhuyinKeys[z];
+        i += len;
+        found = true;
+        break;
+      }
+    }
+    if (!found)
+      return string();
+  }
+  return keys;
+}
+
+}  // namespace
+
+PenglaiKeyCorrector::PenglaiKeyCorrector(const Options& options)
+    : options_(options) {
+  auto safe_log = [](double p) {
+    return p > 0 ? std::log(p) : -std::numeric_limits<double>::infinity();
+  };
+  log_extra_ = safe_log(options_.extra);
+  log_double_ = safe_log(options_.double_press);
+  log_omit_initial_ = safe_log(options_.omit_initial);
+  log_omit_medial_ = safe_log(options_.omit_medial);
+  const auto& positions = KeyPositions();
+  const double sigma = options_.sigma > 0 ? options_.sigma : 0.6;
+  const double cutoff = 1.5;
+  if (options_.substitution > 0) {
+    // 本來要按 intended，按到 typed 的機率 = substitution × w(intended, typed) / Σ w(intended, 附近每個鍵)
+    for (const auto& a : positions) {
+      double total = 0;
+      vector<pair<char, double>> near;
+      for (const auto& b : positions) {
+        if (a.ch == b.ch)
+          continue;
+        double dx = a.x - b.x, dy = a.y - b.y;
+        double d = std::sqrt(dx * dx + dy * dy);
+        if (d > cutoff)
+          continue;
+        double w = std::exp(-d * d / (2 * sigma * sigma));
+        total += w;
+        near.emplace_back(b.ch, w);
+      }
+      if (total <= 0)
+        continue;
+      for (const auto& n : near) {
+        double p = options_.substitution * n.second / total;
+        // 存在 typed 鍵底下：打出 n.first、本來要按 a.ch
+        substitutes_[n.first].emplace_back(a.ch, std::log(p));
+      }
+    }
+  }
+  if (options_.fuzzy > 0) {
+    double lp = std::log(options_.fuzzy);
+    for (const auto& pair_text : options_.fuzzy_pairs) {
+      string keys = ZhuyinToKeys(pair_text);
+      if (keys.size() != 2)
+        continue;
+      fuzzy_[keys[0]].emplace_back(keys[1], lp);
+      fuzzy_[keys[1]].emplace_back(keys[0], lp);
+    }
+  }
+}
+
+void PenglaiKeyCorrector::ToleranceSearch(const Prism& prism,
+                                          const string& key,
+                                          Corrections* results,
+                                          size_t tolerance) {
+  ScoredSearch(prism, key, 0, results);
+}
+
+// 在 prism 的拼法 trie 上做加權的編輯搜尋：每一步可以照打的鍵走（0 分）、換成附近的鍵或模糊音的另一半、
+// 跳過打的鍵（多按）、或不吃輸入補一個鍵（漏打聲母、介音）。走到有值的節點就是一個拼法，記下吃了多少輸入、
+// 總分（log 機率）。完全照打的（0 次錯）由 CommonPrefixSearch 處理，這裡不記
+void PenglaiKeyCorrector::ScoredSearch(const Prism& prism,
+                                       const string& input,
+                                       size_t begin,
+                                       Corrections* results) {
+  if (begin >= input.size())
+    return;
+  const auto& trie = prism.trie();
+  const int max_edits = options_.max_edits;
+  const double kFloor = -20.0;
+  struct State {
+    size_t node;
+    size_t pos;  // 下一個要讀的輸入位置（整串輸入的索引）
+    double score;
+    int edits;
+    int depth;  // 拼法裡已經走了幾個鍵
+    int value;  // 最後一步走到的節點的值（拼法編號），沒有是 -1
+    bool omission;
+    unsigned ops;
+    bool closed;  // 最後一步是照打的聲調鍵
+  };
+  vector<State> stack;
+  stack.push_back({0, begin, 0.0, 0, 0, -1, false, 0, false});
+  map<pair<size_t, size_t>, double> best;  // (節點, 位置) → 最佳分數（同樣錯幾次以內）
+
+  auto step = [&](const State& from, char c, size_t next_pos, double cost,
+                  unsigned op, vector<State>* out) {
+    bool omission = op == kOpOmission;
+    size_t node = from.node;
+    size_t kp = 0;
+    char buf[2] = {c, 0};
+    auto val = trie.traverse(buf, node, kp, 1);
+    if (val == -2)
+      return;
+    State s{node, next_pos, from.score + cost,
+            from.edits + (cost < 0 ? 1 : 0), from.depth + 1,
+            static_cast<int>(val >= 0 ? val : -1), from.omission || omission,
+            from.ops | op, op == 0 && IsIn(" 6347", c)};
+    if (s.edits > max_edits || s.score < kFloor)
+      return;
+    if (val >= 0 && s.edits > 0 &&
+        (s.closed || !options_.require_tone)) {
+      Correction c{static_cast<size_t>(s.edits), static_cast<SyllableId>(val),
+                   s.pos - begin, s.score, true};
+      c.closed = s.closed;
+      c.omission = s.omission;
+      c.ops = s.ops;
+      results->Alter(val, c);
+    }
+    out->push_back(s);
+  };
+
+  while (!stack.empty()) {
+    State st = stack.back();
+    stack.pop_back();
+    auto key = std::make_pair(st.node, st.pos);
+    auto it = best.find(key);
+    if (it != best.end() && it->second >= st.score)
+      continue;
+    best[key] = st.score;
+    vector<State> next;
+    bool has_input = st.pos < input.size();
+    char typed = has_input ? input[st.pos] : 0;
+    if (has_input) {
+      // 照打的鍵走
+      step(st, typed, st.pos + 1, 0.0, 0, &next);
+      if (st.edits < max_edits) {
+        // 按到旁邊的鍵
+        auto sub = substitutes_.find(typed);
+        if (sub != substitutes_.end())
+          for (const auto& alt : sub->second)
+            step(st, alt.first, st.pos + 1, alt.second, kOpSubstitution, &next);
+        // 模糊音
+        auto fz = fuzzy_.find(typed);
+        if (fz != fuzzy_.end())
+          for (const auto& alt : fz->second)
+            step(st, alt.first, st.pos + 1, alt.second, kOpFuzzy, &next);
+        // 多按一鍵：同一個鍵連按兩下在哪裡都算；其他的只算在拼法中間（不能是一個音節的第一個鍵）
+        char prev = st.pos > 0 ? input[st.pos - 1] : 0;
+        bool is_double = prev && prev == typed && typed != ' ';
+        double cost = is_double ? log_double_ : (st.depth > 0 ? log_extra_ : -INFINITY);
+        if (std::isfinite(cost)) {
+          State s = st;
+          s.pos += 1;
+          s.score += cost;
+          s.edits += 1;
+          s.ops |= is_double ? kOpDouble : kOpExtra;
+          if (s.edits <= max_edits && s.score >= kFloor) {
+            // 多按的那一鍵在拼法最後（ㄐㄐ 當一個 ㄐ）：剛走到的節點就是拼法。
+            // 多按的是聲調鍵（ˋˋ）時，前一步照打的聲調鍵還算數
+            if (is_double && st.value >= 0 &&
+                (st.closed || !options_.require_tone)) {
+              Correction c{static_cast<size_t>(s.edits),
+                           static_cast<SyllableId>(st.value), s.pos - begin,
+                           s.score, true};
+              c.omission = s.omission;
+              c.ops = s.ops;
+              c.closed = st.closed;
+              results->Alter(st.value, c);
+            }
+            next.push_back(s);
+          }
+        }
+      }
+    }
+    if (st.edits < max_edits && has_input) {
+      // 漏打聲母：音節的第一個鍵，打的是韻母或介音；前一個鍵是聲母時不算（那個聲母多半就是這個音節的，
+      // 或是只打第一個注音的字，照打的就讀得通）
+      char before = st.pos > 0 ? input[st.pos - 1] : 0;
+      if (st.depth == 0 && std::isfinite(log_omit_initial_) &&
+          !IsIn(kInitialKeys, typed) && !IsIn(" 6347", typed) &&
+          !IsIn(kInitialKeys, before)) {
+        for (const char* c = kInitialKeys; *c; ++c)
+          step(st, *c, st.pos, log_omit_initial_, kOpOmission, &next);
+      }
+      // 漏打介音：聲母後面，打的是韻母
+      if (st.depth == 1 && std::isfinite(log_omit_medial_) &&
+          !IsIn(kMedialKeys, typed) && !IsIn(kInitialKeys, typed) &&
+          !IsIn(" 6347", typed)) {
+        for (const char* c = kMedialKeys; *c; ++c)
+          step(st, *c, st.pos, log_omit_medial_, kOpOmission, &next);
+      }
+    }
+    for (auto& s : next)
+      stack.push_back(s);
+  }
+}
+
 Corrector* CorrectorComponent::Create(const Ticket& ticket) noexcept {
+  // 蓬萊：translator/key_model 打開時用按鍵模型
+  if (ticket.schema) {
+    Config* config = ticket.schema->config();
+    bool enabled = false;
+    string ns = ticket.name_space + "/key_model";
+    if (config->GetBool(ns + "/enable", &enabled) && enabled) {
+      PenglaiKeyCorrector::Options o;
+      config->GetDouble(ns + "/substitution", &o.substitution);
+      config->GetDouble(ns + "/sigma", &o.sigma);
+      config->GetDouble(ns + "/extra", &o.extra);
+      config->GetDouble(ns + "/double_press", &o.double_press);
+      config->GetDouble(ns + "/omit_initial", &o.omit_initial);
+      config->GetDouble(ns + "/omit_medial", &o.omit_medial);
+      config->GetDouble(ns + "/fuzzy", &o.fuzzy);
+      config->GetInt(ns + "/max_edits", &o.max_edits);
+      config->GetString(ns + "/abbreviations", &o.abbreviations);
+      config->GetBool(ns + "/require_tone", &o.require_tone);
+      config->GetDouble(ns + "/valid", &o.valid);
+      config->GetBool(ns + "/valid_suggest", &o.valid_suggest);
+      config->GetBool(ns + "/closed_type", &o.closed_type);
+      config->GetBool(ns + "/valid_first", &o.valid_first);
+      if (auto list = config->GetList(ns + "/fuzzy_pairs")) {
+        for (size_t i = 0; i < list->size(); ++i) {
+          if (auto v = list->GetValueAt(i))
+            o.fuzzy_pairs.push_back(v->str());
+        }
+      }
+      return new PenglaiKeyCorrector(o);
+    }
+  }
   // Don't use edit distance based correction for now.
 #if 0
   if (!ticket.schema) return nullptr;

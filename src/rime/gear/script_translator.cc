@@ -232,6 +232,8 @@ class ScriptSyllabifier : public PhraseSyllabifier {
   string GetPreeditString(const Phrase& cand) const;
   string GetOriginalSpelling(const Phrase& cand) const;
   bool IsCorrection(const Code& code, size_t code_length) const;
+  // 蓬萊：這條路有沒有用到按鍵模型的建議邊（SyllableGraph::weak），從 start 到 end
+  bool UsesWeak(const Code& code, size_t start, size_t end) const;
 
   const SyllableGraph& syllable_graph() const { return syllable_graph_; }
   // 蓬萊：建過幾次圖（ScriptTranslation::MainRow 的備忘照它判斷音節圖換過沒有）
@@ -274,6 +276,8 @@ class ScriptTranslation : public Translation {
         max_sentences_(max_sentences),
         sentence_cutoff_threshold_(sentence_cutoff_threshold) {
     set_exhausted(true);
+    max_corrections_ = static_cast<size_t>(translator->max_corrections());
+    scored_correction_ = corrector && corrector->Scored();
   }
   bool Evaluate(Dictionary* dict, UserDictionary* user_dict);
   virtual bool Next();
@@ -327,7 +331,9 @@ class ScriptTranslation : public Translation {
   bool PrepareCandidate();
   template <class QueryResult>
   void EnrollEntries(map<int, DictEntryList>& entries_by_end_pos,
-                     const an<QueryResult>& query_result);
+                     const an<QueryResult>& query_result,
+                     size_t start_pos = 0,
+                     bool skip_weak = false);
   WordGraph PrepareForMakingSentence(Dictionary* dict,
                                      UserDictionary* user_dict);
   an<Sentence> MakeSentence(Dictionary* dict, UserDictionary* user_dict);
@@ -351,6 +357,8 @@ class ScriptTranslation : public Translation {
   // 蓬萊 4D：整段剛好有詞、本來不組整句的短輸入照樣組，決定那一句排第幾（sentence_from_）
   bool WantShortSentence() const;
   void PlaceShortSentence(bool has_user_head);
+  // 蓬萊：按鍵模型。整段剛好的詞是容錯來的（不算可靠，所以組了整句）：它的分數贏過最好的整句就排第一
+  void PlaceCorrectionHead(size_t consumed);
   size_t sentence_from_ = 0;  // 整句從第幾個候選起出（4D 沒贏時不是 0）
   bool HeadDone() const;
   an<Phrase> MakePhrase(const an<DictEntry>& entry,
@@ -365,6 +373,10 @@ class ScriptTranslation : public Translation {
   set<const DictEntry*> recent_set_;            // 原本的位置輪到時跳過
   size_t recent_index_ = 0;
   deque<Deferred> deferred_;
+  // 蓬萊：按鍵模型。整段照打就有詞典詞時，第一個候選要是照打的；排在它前面的容錯詞先收著，第一個候選之後出
+  bool hold_corrections_ = false;
+  deque<Deferred> held_;
+  size_t held_at_ = 1;  // 收著的容錯詞從第幾個候選起出
   map<size_t, int> quota_used_;  // 音節數 → 蓋不住整段的詞出了幾個
   set<string> quota_texts_;      // 算過名額的詞
 
@@ -398,19 +410,21 @@ class ScriptTranslation : public Translation {
     kEnglishLate,
     kRecent,
     kDeferred,
+    kHeld,
   };
   CandidateSource candidate_source_ = kUninitialized;
 
   DictEntryCollector::reverse_iterator phrase_iter_;
   UserDictEntryCollector::reverse_iterator user_phrase_iter_;
 
-  const size_t max_corrections_ = 4;
+  size_t max_corrections_ = 4;
   size_t correction_count_ = 0;
   int max_sentences_ = 1;
   double sentence_cutoff_threshold_ = 0.1;
 
   Corrector* corrector_;
   bool enable_correction_;
+  bool scored_correction_ = false;  // 蓬萊：按鍵模型
 };
 
 // 蓬萊：按鍵層語言辨識的候選（translator/english_keylid）排在第 position 個起、到那一頁結束：前面 position − 1 個
@@ -755,6 +769,16 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
     config->GetBool(name_space_ + "/always_show_comments",
                     &always_show_comments_);
     config->GetBool(name_space_ + "/enable_correction", &enable_correction_);
+    // 蓬萊：按鍵模型（translator/key_model/enable）也走容錯這條路，corrector 元件照設定建按鍵模型
+    bool key_model = false;
+    if (config->GetBool(name_space_ + "/key_model/enable", &key_model) &&
+        key_model) {
+      enable_correction_ = true;
+      // 按鍵模型的容錯多，原本的 4 個常被整句用完（整句也算容錯候選）
+      if (!config->GetInt(name_space_ + "/key_model/max_corrections",
+                          &max_corrections_))
+        max_corrections_ = 30;
+    }
     if (!config->GetBool(name_space_ + "/enable_word_completion",
                          &enable_word_completion_)) {
       enable_word_completion_ = enable_completion_;
@@ -1646,6 +1670,27 @@ bool ScriptSyllabifier::IsCorrection(const Code& code,
   return false;
 }
 
+bool ScriptSyllabifier::UsesWeak(const Code& code,
+                                 size_t start,
+                                 size_t end) const {
+  if (syllable_graph_.weak.empty())
+    return false;
+  vector<std::tuple<size_t, size_t, SyllableId>> path;
+  SyllabifyTask task{
+      code, syllable_graph_, end,
+      [&](SyllabifyTask* task, size_t depth, size_t current_pos,
+          size_t next_pos) {
+        path.emplace_back(current_pos, next_pos, task->code[depth]);
+      },
+      [&](SyllabifyTask* task, size_t depth) { path.pop_back(); }};
+  if (syllabify_dfs(&task, 0, start)) {
+    for (const auto& e : path)
+      if (syllable_graph_.weak.count(e))
+        return true;
+  }
+  return false;
+}
+
 string ScriptSyllabifier::GetPreeditString(const Phrase& cand) const {
   const auto& delimiters = translator_->delimiters();
   std::stack<size_t> lengths;
@@ -1728,6 +1773,40 @@ bool ScriptTranslation::Evaluate(Dictionary* dict, UserDictionary* user_dict) {
       has_exact_match_phrase(user_phrase_, user_phrase_iter_, consumed) &&
       !is_correction_match(*user_phrase_iter_, consumed);
 
+  // 蓬萊：按鍵模型。整段剛好的詞排第一個是容錯來的，但同樣長度裡還有照打的詞：照打的算可靠（不先出整句），
+  // 第一個候選出照打的，容錯的往後挪（Google 的「容錯要贏過照打的」，這裡照打是詞典詞時容錯不搶第一）
+  const bool sys_top_correction =
+      has_exact_match_phrase(phrase_, phrase_iter_, consumed) &&
+      is_correction_match(*phrase_iter_, consumed);
+  const bool user_top_correction =
+      has_exact_match_phrase(user_phrase_, user_phrase_iter_, consumed) &&
+      is_correction_match(*user_phrase_iter_, consumed);
+  if (corrector_ && corrector_->Scored() &&
+      (sys_top_correction || user_top_correction)) {
+    bool sys_exact = phrase_ && phrase_iter_ != phrase_->rend() &&
+                     phrase_iter_->first == consumed &&
+                     phrase_iter_->second.AnyRemainingCode(
+                         [&](const Code& code, bool predictive) {
+                           return !predictive &&
+                                  !syllabifier_->IsCorrection(code, consumed);
+                         });
+    bool user_exact = false;
+    if (user_phrase_ && user_phrase_iter_ != user_phrase_->rend() &&
+        user_phrase_iter_->first == consumed) {
+      user_phrase_iter_->second.ForEachRemaining([&](const an<DictEntry>& e) {
+        if (!user_exact && e->IsExactMatch() &&
+            !syllabifier_->IsCorrection(e->code, consumed))
+          user_exact = true;
+      });
+    }
+    if ((sys_exact || user_exact) && !has_reliable_phrase &&
+        !has_reliable_user_phrase) {
+      has_reliable_phrase = sys_exact;
+      has_reliable_user_phrase = user_exact;
+      hold_corrections_ = true;
+    }
+  }
+
   bool has_at_least_two_syllables = syllable_graph.edges.size() >= 2;
   DLOG(INFO) << "consumed: " << consumed
              << ", has_reliable_phrase: " << has_reliable_phrase
@@ -1745,6 +1824,8 @@ bool ScriptTranslation::Evaluate(Dictionary* dict, UserDictionary* user_dict) {
       else
         sentences_.clear();
     }
+    if (corrector_ && corrector_->Scored() && !sentences_.empty())
+      PlaceCorrectionHead(consumed);
   }
   if (translator_->english_lexicon())
     MakeEnglishCandidates(dict, user_dict);
@@ -1795,6 +1876,10 @@ bool ScriptTranslation::Next() {
         if (!deferred_.empty())
           deferred_.pop_front();
         break;
+      case kHeld:
+        if (!held_.empty())
+          held_.pop_front();
+        break;
       case kUserPhrase: {
         UserDictEntryIterator& uter(user_phrase_iter_->second);
         // 蓬萊：第一個候選本來就是最近打過的詞（前面沒有整句、整段剛好的詞），之後不再拉一次
@@ -1826,14 +1911,16 @@ bool ScriptTranslation::Next() {
       ++quota_used_[candidate_->code().size()];
     candidate_.reset();
     candidate_source_ = kUninitialized;
-    if (enable_correction_) {
+    // 蓬萊：按鍵模型不限容錯候選的個數（這段會在 candidate_index_ 加一之前先備下一個候選，
+    // 照位置判斷的規則（長詞名額、收著的容錯詞）會差一格）
+    if (enable_correction_ && !scored_correction_) {
       // populate next candidate and skip it if it's a correction beyond max
       // numbers.
       if (!PrepareCandidate()) {
         break;
       }
     }
-  } while (enable_correction_ &&
+  } while (enable_correction_ && !scored_correction_ &&
            syllabifier_->IsCorrection(candidate_->code(),
                                       candidate_->end() - start_) &&
            // limit the number of correction candidates
@@ -1906,6 +1993,13 @@ iter_incremented:
     candidate_ = english_late_.front();
     return true;
   }
+  // 蓬萊：收著的容錯詞接在第一個候選後面
+  if (!held_.empty() && candidate_index_ >= held_at_) {
+    const auto& d = held_.front();
+    candidate_source_ = kHeld;
+    candidate_ = MakePhrase(d.entry, d.code_length, d.user);
+    return true;
+  }
   if (!sentences_.empty() && candidate_index_ >= sentence_from_) {
     candidate_source_ = kSentence;
     candidate_ = sentences_[0];
@@ -1966,6 +2060,12 @@ iter_incremented:
     const auto& entry = uter.Peek();
     // 蓬萊：已經拉到前面的最近打過的詞、超過名額的長詞：跳過（後者收著最後出）
     bool skip = candidate_index_ > 0 && recent_set_.count(entry.get());
+    if (!skip && hold_corrections_ && candidate_index_ == 0 &&
+        user_phrase_code_length == full_code_length &&
+        syllabifier_->IsCorrection(entry->code, user_phrase_code_length)) {
+      held_.push_back({entry, user_phrase_code_length, true});
+      skip = true;
+    }
     if (!skip && over_quota(entry, user_phrase_code_length)) {
       deferred_.push_back({entry, user_phrase_code_length, true});
       skip = true;
@@ -1982,6 +2082,9 @@ iter_incremented:
         New<Phrase>(translator_->language(),
                     entry->IsPredictiveMatch() ? "completion" : "user_phrase",
                     start_, start_ + user_phrase_code_length, entry);
+    if (corrector_ && corrector_->Scored())
+      As<Phrase>(candidate_)->set_correction(
+          syllabifier_->IsCorrection(entry->code, user_phrase_code_length));
     candidate_->set_quality(std::exp(entry->weight) +
                             translator_->initial_quality() +
                             (entry->quality_len / full_code_length));
@@ -1993,6 +2096,14 @@ iter_incremented:
       goto iter_incremented;
     }
     const auto& entry = iter.Peek();
+    if (hold_corrections_ && candidate_index_ == 0 &&
+        phrase_code_length == full_code_length &&
+        syllabifier_->IsCorrection(entry->code, phrase_code_length)) {
+      held_.push_back({entry, phrase_code_length, false});
+      if (!iter.Next())
+        ++phrase_iter_;
+      goto iter_incremented;
+    }
     if (over_quota(entry, phrase_code_length)) {
       deferred_.push_back({entry, phrase_code_length, false});
       if (!iter.Next())
@@ -2006,6 +2117,9 @@ iter_incremented:
         New<Phrase>(translator_->language(),
                     entry->IsPredictiveMatch() ? "completion" : "phrase",
                     start_, start_ + phrase_code_length, entry);
+    if (corrector_ && corrector_->Scored())
+      As<Phrase>(candidate_)->set_correction(
+          syllabifier_->IsCorrection(entry->code, phrase_code_length));
     candidate_->set_quality(std::exp(entry->weight) +
                             translator_->initial_quality() +
                             (entry->quality_len / full_code_length));
@@ -2121,6 +2235,49 @@ void ScriptTranslation::PlaceShortSentence(bool has_user_head) {
   sentence_from_ = static_cast<size_t>(position - 1);
 }
 
+void ScriptTranslation::PlaceCorrectionHead(size_t consumed) {
+  an<DictEntry> head;
+  bool user_head = false;
+  if (user_phrase_ && user_phrase_iter_ != user_phrase_->rend() &&
+      user_phrase_iter_->first == consumed && !user_phrase_iter_->second.exhausted()) {
+    head = user_phrase_iter_->second.Peek();
+    user_head = true;
+  }
+  if (phrase_ && phrase_iter_ != phrase_->rend() &&
+      phrase_iter_->first == consumed && !phrase_iter_->second.exhausted()) {
+    auto p = phrase_iter_->second.Peek();
+    if (!head || p->weight > head->weight) {
+      head = p;
+      user_head = false;
+    }
+  }
+  // 只處理容錯來的（照打的整段詞本來就排在前面）
+  if (!head || !syllabifier_->IsCorrection(head->code, consumed))
+    return;
+  if (!head)
+    return;
+  const string context = translator_->GetPrecedingText(start_);
+  const double head_score = poet_->Evaluate(context, *head, true);
+  // 照打合法的那段換成別的（建議邊）不搶第一
+  const bool weak = !corrector_->ValidFirst() &&
+                    syllabifier_->UsesWeak(head->code, 0, consumed);
+  if (!weak && head_score >= sentences_.front()->weight()) {
+    sentence_from_ = 1;
+    return;
+  }
+  // 沒贏：排第二（第一句整句後面），當建議
+  bool user = user_head;
+  held_.push_back({head, consumed, user});
+  held_at_ = 1;
+  if (user) {
+    if (!user_phrase_iter_->second.Next())
+      ++user_phrase_iter_;
+  } else {
+    if (!phrase_iter_->second.Next())
+      ++phrase_iter_;
+  }
+}
+
 bool ScriptTranslation::HeadDone() const {
   // 第一個候選照原本的
   if (candidate_index_ == 0)
@@ -2144,6 +2301,8 @@ an<Phrase> ScriptTranslation::MakePhrase(const an<DictEntry>& entry,
       start_, start_ + code_length, entry);
   phrase->set_quality(std::exp(entry->weight) + translator_->initial_quality() +
                       (entry->quality_len / (end_of_input_ - start_)));
+  if (corrector_ && corrector_->Scored())
+    phrase->set_correction(syllabifier_->IsCorrection(entry->code, code_length));
   return phrase;
 }
 
@@ -2171,13 +2330,18 @@ bool ScriptTranslation::CheckEmpty() {
 template <class QueryResult>
 void ScriptTranslation::EnrollEntries(
     map<int, DictEntryList>& entries_by_end_pos,
-    const an<QueryResult>& query_result) {
+    const an<QueryResult>& query_result,
+    size_t start_pos,
+    bool skip_weak) {
   if (query_result) {
     for (auto& y : *query_result) {
       DictEntryList& homophones = entries_by_end_pos[y.first];
       while (homophones.size() < translator_->max_homophones() &&
              !y.second.exhausted()) {
-        homophones.push_back(y.second.Peek());
+        auto e = y.second.Peek();
+        // 蓬萊：按鍵模型的建議邊不進整句，也不佔名額
+        if (!skip_weak || !syllabifier_->UsesWeak(e->code, start_pos, y.first))
+          homophones.push_back(e);
         if (!y.second.Next())
           break;
       }
@@ -2198,17 +2362,20 @@ const SentenceCacheRow& ScriptTranslation::MainRow(Dictionary* dict,
   const auto& syllable_graph = syllabifier_->syllable_graph();
   map<int, DictEntryList> same_start_pos;
   size_t watermark = start_pos;
+  const bool skip_weak = !syllable_graph.weak.empty();
   if (user_dict) {
     EnrollEntries(same_start_pos,
                   user_dict->Lookup(syllable_graph, start_pos,
                                     translator_->max_user_phrase_syllables(),
-                                    0, 0.0, &watermark));
+                                    0, 0.0, &watermark),
+                  start_pos, skip_weak);
   }
   // merge lookup results
   EnrollEntries(same_start_pos,
                 dict->Lookup(syllable_graph, start_pos,
                              &translator_->blacklist(), false, 0.0,
-                             &watermark));
+                             &watermark),
+                start_pos, skip_weak);
   auto& row = row_memo_[start_pos];
   row.entries = New<map<int, DictEntryList>>(std::move(same_start_pos));
   row.watermark = watermark;

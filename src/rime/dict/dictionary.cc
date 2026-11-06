@@ -224,6 +224,22 @@ bool DictEntryIterator::exhausted() const {
   return chunk_index_ >= query_result_->chunks.size();
 }
 
+bool DictEntryIterator::AnyRemainingCode(
+    const std::function<bool(const Code&, bool)>& f) const {
+  if (!query_result_)
+    return false;
+  for (size_t i = chunk_index_; i < query_result_->chunks.size(); ++i) {
+    const auto& c = query_result_->chunks[i];
+    if (!c.entries || c.cursor >= c.size)
+      continue;
+    Code code;
+    code.assign(c.code.data(), c.code.data() + c.code.size());
+    if (f(code, c.is_predictive_match()))
+      return true;
+  }
+  return false;
+}
+
 // Dictionary members
 
 Dictionary::Dictionary(string name,

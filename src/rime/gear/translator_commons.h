@@ -80,6 +80,9 @@ class Phrase : public Candidate {
   const an<PhraseSyllabifier>& syllabifier() const { return syllabifier_; }
   double weight() const { return entry_->weight; }
   void set_weight(double weight) { entry_->weight = weight; }
+  // 蓬萊：按鍵模型容錯來的詞（前文重排不讓它搶走照打的第一個）
+  bool correction() const { return correction_; }
+  void set_correction(bool c) { correction_ = c; }
   Code& code() const { return entry_->code; }
   const DictEntry& entry() const { return *entry_; }
   const Language* language() const { return language_; }
@@ -109,6 +112,7 @@ class Phrase : public Candidate {
   const Language* language_;
   an<DictEntry> entry_;
   an<PhraseSyllabifier> syllabifier_;
+  bool correction_ = false;
 };
 
 //

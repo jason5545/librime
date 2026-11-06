@@ -89,6 +89,8 @@ class ScriptTranslator : public Translator,
   double english_min_zipf() const { return english_min_zipf_; }
   int english_position() const { return english_position_; }
   int english_max_sentences() const { return english_max_sentences_; }
+  // 蓬萊：容錯候選最多幾個（原本寫死 4；按鍵模型 translator/key_model/max_corrections）
+  int max_corrections() const { return max_corrections_; }
   double english_weight() const { return english_weight_; }
   // 蓬萊：中英混輸的判斷（translator/english_judge）。有表時英文句和原本的第一候選都打分，
   // 英文句贏過第一候選 english_judge_tau × 英文段數以上才排第一；沒有表時照舊排在 english_position
@@ -222,6 +224,7 @@ class ScriptTranslator : public Translator,
   double english_min_zipf_ = 3.0;
   int english_position_ = 2;
   int english_max_sentences_ = 2;
+  int max_corrections_ = 4;
   double english_weight_ = 0.0;
   an<EnglishJudge> english_judge_;
   double english_judge_tau_ = 4.0;

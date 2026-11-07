@@ -12,6 +12,7 @@
 #include <rime/engine.h>
 #include <rime/key_event.h>
 #include <rime/key_table.h>
+#include <rime/menu.h>
 #include <rime/schema.h>
 #include <rime/gear/navigator.h>
 #include <rime/gear/translator_commons.h>
@@ -198,9 +199,29 @@ void Navigator::BeginMove(Context* ctx) {
     input_ = ctx->input();
     spans_.Clear();
     for (const auto& seg : ctx->composition()) {
-      if (auto phrase = As<Phrase>(
-              Candidate::GetGenuineCandidate(seg.GetSelectedCandidate()))) {
-        spans_.AddSpans(phrase->spans());
+      auto selected =
+          As<Phrase>(Candidate::GetGenuineCandidate(seg.GetSelectedCandidate()));
+      size_t covered = seg.start;
+      if (selected) {
+        spans_.AddSpans(selected->spans());
+        covered = selected->end();
+        spans_.AddVertex(covered);
+      }
+      // 蓬萊：反白的候選只蓋住前段時（翻頁、↑↓ 移到短的詞），後段沒有切點，← 會一下跳到那個詞後面、
+      // 中間的音節全跳過。後段照第一個候選（通常是整句）的切點
+      if (covered < seg.end && seg.menu) {
+        auto top = As<Phrase>(
+            Candidate::GetGenuineCandidate(seg.menu->GetCandidateAt(0)));
+        if (top && top != selected && top->start() <= covered) {
+          Spans rest = top->spans();
+          for (size_t pos = covered;;) {
+            size_t next = rest.NextStop(pos);
+            if (next == pos || next > seg.end)
+              break;
+            spans_.AddVertex(next);
+            pos = next;
+          }
+        }
       }
       spans_.AddSpan(seg.start, seg.end);
     }

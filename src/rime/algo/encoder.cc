@@ -315,7 +315,19 @@ bool ScriptEncoder::DfsEncode(const string& phrase,
     return true;
   }
   bool ret = false;
-  for (size_t k = phrase.length() - start_pos; k > 0; --k) {
+  // 蓬萊：照 UTF-8 字元邊界切，從最長的切起（原本 k 是位元組數，一個中文字 3 個位元組，大部分切法
+  // 切在半個字上、白查一次 TranslateWord：11/7 Jason 的詞典部署一次查 410 萬次，三分之二是這種）。
+  // 查得到的只有完整的字串（詞典的字都是完整的 UTF-8），切法和順序跟原本相同，輸出不變
+  const char* const begin = phrase.c_str() + start_pos;
+  const char* const end = phrase.c_str() + phrase.length();
+  size_t ends[kMaxPhraseLength + 1];
+  size_t num_ends = 0;
+  for (const char* p = begin; p < end && num_ends <= kMaxPhraseLength;) {
+    utf8::unchecked::next(p);
+    ends[num_ends++] = (std::min)(p, end) - begin;
+  }
+  while (num_ends > 0) {
+    const size_t k = ends[--num_ends];
     string word(phrase.substr(start_pos, k));
     vector<string> translations;
     if (collector_->TranslateWord(word, &translations)) {

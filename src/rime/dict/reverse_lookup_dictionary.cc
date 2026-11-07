@@ -29,41 +29,53 @@ static const char* kStemKeySuffix = "\x1fstem";
 
 ReverseDb::ReverseDb(const path& file_path) : MappedFile(file_path) {}
 
+// 蓬萊：壞掉的檔（截斷、寫壞）一律當成載入失敗：回 false、關檔，不讀到檔案外面，部署看到就重建主表和它。
+// 檢查檔頭指到的各區塊（詞典設定字串、索引、兩個字串表）都在檔案裡；字串表是最後寫進檔案的，截斷一定碰到
 bool ReverseDb::Load() {
   LOG(INFO) << "loading reversedb: " << file_path();
 
   if (IsOpen())
     Close();
 
-  if (!OpenReadOnly()) {
-    LOG(ERROR) << "Error opening reversedb '" << file_path() << "'.";
+  auto fail = [this](const char* message) {
+    LOG(ERROR) << message << " reversedb: '" << file_path() << "'.";
+    Close();
+    metadata_ = nullptr;
+    key_trie_.reset();
+    value_trie_.reset();
     return false;
-  }
+  };
 
+  if (!OpenReadOnly())
+    return fail("error opening");
+  if (file_size() < sizeof(reverse::Metadata))
+    return fail("metadata not found in");
   metadata_ = Find<reverse::Metadata>(0);
-  if (!metadata_) {
-    LOG(ERROR) << "metadata not found.";
-    Close();
-    return false;
-  }
+  if (!metadata_)
+    return fail("metadata not found in");
   if (strncmp(metadata_->format, kReverseFormatPrefix,
-              kReverseFormatPrefixLen)) {
-    LOG(ERROR) << "invalid metadata.";
-    Close();
-    return false;
-  }
+              kReverseFormatPrefixLen))
+    return fail("invalid metadata in");
   double format = std::atof(&metadata_->format[kReverseFormatPrefixLen]);
   if (format - kReverseFormatCompatible < 0.0 - DBL_EPSILON ||
-      format - kReverseFormatCompatible > 1.0 + DBL_EPSILON) {
-    LOG(ERROR) << "incompatible reversedb format.";
-    Close();
-    return false;
-  }
+      format - kReverseFormatCompatible > 1.0 + DBL_EPSILON)
+    return fail("incompatible format of");
 
-  key_trie_.reset(
-      new StringTable(metadata_->key_trie.get(), metadata_->key_trie_size));
-  value_trie_.reset(
-      new StringTable(metadata_->value_trie.get(), metadata_->value_trie_size));
+  if (!StringInBounds(metadata_->dict_settings) ||
+      !ListInBounds(metadata_->index))
+    return fail("index out of bounds in");
+  const char* key_trie = metadata_->key_trie.get();
+  const char* value_trie = metadata_->value_trie.get();
+  if (!key_trie || !InBounds(key_trie, 1, metadata_->key_trie_size) ||
+      !value_trie || !InBounds(value_trie, 1, metadata_->value_trie_size))
+    return fail("string tables out of bounds in");
+  try {
+    key_trie_.reset(new StringTable(key_trie, metadata_->key_trie_size));
+    value_trie_.reset(new StringTable(value_trie, metadata_->value_trie_size));
+  } catch (const std::exception& ex) {
+    LOG(ERROR) << "error loading string tables: " << ex.what();
+    return fail("broken string tables in");
+  }
 
   return true;
 }
@@ -73,7 +85,8 @@ bool ReverseDb::Lookup(const string& text, string* result) {
     return false;
   }
   StringId key_id = key_trie_->Lookup(text);
-  if (key_id == kInvalidStringId) {
+  // 蓬萊：索引比字串表短（檔案寫壞）時不讀到索引外面
+  if (key_id == kInvalidStringId || key_id >= metadata_->index.size) {
     return false;
   }
   StringId value_id = metadata_->index.at[key_id];

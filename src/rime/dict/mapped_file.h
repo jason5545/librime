@@ -105,6 +105,15 @@ class RIME_DLL MappedFile {
   size_t capacity() const;
   char* address() const;
 
+  // 蓬萊：讀進來的檔可能被截斷、寫壞（斷電、磁碟滿、別的程式截斷檔案），Load 先用這幾個確定
+  // 檔頭指到的區塊都在檔案範圍內，不在就當成載入失敗，不去讀檔案外面
+  bool InBounds(const void* ptr, size_t elem_size, size_t count) const;
+  template <class T, class Size>
+  bool ArrayInBounds(const Array<T, Size>* array) const;
+  template <class T, class Size>
+  bool ListInBounds(const List<T, Size>& list) const;
+  bool StringInBounds(const String& str) const;
+
  public:
   // noncpyable
   MappedFile(const MappedFile&) = delete;
@@ -122,7 +131,15 @@ class RIME_DLL MappedFile {
   size_t file_size() const { return size_; }
 
  private:
+  // 蓬萊：Create 寫的是同一個資料夾裡的暫存檔，ShrinkToFit 寫完才寫進磁碟、換名成 file_path_
+  const path& active_path() const {
+    return temp_path_.empty() ? file_path_ : temp_path_;
+  }
+  bool Commit();
+  void DiscardTemp();
+
   path file_path_;
+  path temp_path_;
   size_t size_ = 0;
   the<MappedFileImpl> file_;
 };
@@ -156,6 +173,19 @@ T* MappedFile::Find(size_t offset) {
   if (!IsOpen() || offset > size_)
     return NULL;
   return reinterpret_cast<T*>(address() + offset);
+}
+
+template <class T, class Size>
+bool MappedFile::ArrayInBounds(const Array<T, Size>* array) const {
+  const size_t header = reinterpret_cast<const char*>(&array->at[0]) -
+                        reinterpret_cast<const char*>(array);
+  return InBounds(array, header, 1) &&
+         InBounds(&array->at[0], sizeof(T), array->size);
+}
+
+template <class T, class Size>
+bool MappedFile::ListInBounds(const List<T, Size>& list) const {
+  return list.size == 0 || InBounds(list.at.get(), sizeof(T), list.size);
 }
 
 template <class T>

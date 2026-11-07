@@ -337,7 +337,8 @@ bool DictCompiler::BuildTable(int table_index,
     if (settings->sort_order() != "original") {
       vocabulary.SortHomophones();
     }
-    table->Remove();
+    // 蓬萊：不先刪掉舊檔。Build 寫到暫存檔、Save 寫完才換名換上去（MappedFile::Create），
+    // 建置中舊檔照樣在、讀得到，失敗時也還在（下次部署照 checksum 再重建）
     if (!table->Build(collector.syllabary, vocabulary, collector.num_entries,
                       dict_file_checksum) ||
         !table->Save()) {
@@ -430,7 +431,7 @@ bool DictCompiler::BuildPrism(const path& schema_file,
   }
   // build .prism.bin
   {
-    prism_->Remove();
+    // 蓬萊：不先刪掉舊檔，同上（BuildTable）
     if (!prism_->Build(syllabary, script.empty() ? nullptr : &script,
                        dict_file_checksum, schema_file_checksum) ||
         !prism_->Save()) {

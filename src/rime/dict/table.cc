@@ -278,60 +278,81 @@ bool Table::OnBuildFinish() {
   return true;
 }
 
+// 蓬萊：字串表（marisa）的映像要整個在檔案裡。marisa 自己會照給它的大小檢查內部的區塊，超出就丟例外；
+// 給的大小超出檔案時 marisa 照樣讀下去，就讀到檔案外面（11/7：截掉一半的 .table.bin 在這裡 SIGSEGV）
 bool Table::OnLoad() {
-  string_table_.reset(new StringTable(metadata_->string_table.get(),
-                                      metadata_->string_table_size));
+  const char* image = metadata_->string_table.get();
+  const size_t image_size = metadata_->string_table_size;
+  if (!image || !InBounds(image, 1, image_size)) {
+    LOG(ERROR) << "string table out of file bounds.";
+    return false;
+  }
+  try {
+    string_table_.reset(new StringTable(image, image_size));
+  } catch (const std::exception& ex) {
+    LOG(ERROR) << "error loading string table: " << ex.what();
+    string_table_.reset();
+    return false;
+  }
   return true;
+}
+
+void Table::Unload() {
+  Close();
+  metadata_ = nullptr;
+  syllabary_ = nullptr;
+  index_ = nullptr;
+  string_table_.reset();
 }
 
 Table::Table(const path& file_path) : MappedFile(file_path) {}
 
 Table::~Table() {}
 
+// 蓬萊：壞掉的檔（截斷、寫壞）一律當成載入失敗：回 false、關檔、清掉指到檔案裡的指標，不讀到檔案外面，
+// 部署看到載入失敗就重建。只檢查檔頭指到的區塊（音節表、第一層索引、字串表），不逐筆檢查詞條：
+// 字串表是最後寫進檔案的，檔案從哪裡截斷都會碰到它；逐筆檢查要在載入時讀過整份索引（多佔記憶體），
+// 放在查詞時又是每一鍵都多做
 bool Table::Load() {
   LOG(INFO) << "loading table file: " << file_path();
 
   if (IsOpen())
     Close();
 
-  if (!OpenReadOnly()) {
-    LOG(ERROR) << "Error opening table file '" << file_path() << "'.";
+  auto fail = [this](const char* message) {
+    LOG(ERROR) << message << " table file: '" << file_path() << "'.";
+    Unload();
     return false;
-  }
+  };
 
+  if (!OpenReadOnly())
+    return fail("error opening");
+  if (file_size() < sizeof(table::Metadata))
+    return fail("metadata not found in");
   metadata_ = Find<table::Metadata>(0);
-  if (!metadata_) {
-    LOG(ERROR) << "metadata not found.";
-    Close();
-    return false;
-  }
-  if (strncmp(metadata_->format, kTableFormatPrefix, kTableFormatPrefixLen)) {
-    LOG(ERROR) << "invalid metadata.";
-    Close();
-    return false;
-  }
+  if (!metadata_)
+    return fail("metadata not found in");
+  if (strncmp(metadata_->format, kTableFormatPrefix, kTableFormatPrefixLen))
+    return fail("invalid metadata in");
   double format_version = atof(&metadata_->format[kTableFormatPrefixLen]);
   if (format_version < kTableFormatLowestCompatible - DBL_EPSILON) {
     LOG(ERROR) << "table format version " << format_version
                << " is no longer supported. please upgrade to version "
                << kTableFormatLatest;
-    return false;
+    // 蓬萊：原本這裡沒有關檔，下次 IsOpen() 會被當成已經載入
+    return fail("unsupported format of");
   }
 
   syllabary_ = metadata_->syllabary.get();
-  if (!syllabary_) {
-    LOG(ERROR) << "syllabary not found.";
-    Close();
-    return false;
-  }
+  if (!syllabary_ || !ArrayInBounds(syllabary_))
+    return fail("syllabary not found in");
   index_ = metadata_->index.get();
-  if (!index_) {
-    LOG(ERROR) << "table index not found.";
-    Close();
-    return false;
-  }
+  if (!index_ || !ArrayInBounds(index_))
+    return fail("table index not found in");
 
-  return OnLoad();
+  if (!OnLoad())
+    return fail("error loading string table of");
+  return true;
 }
 
 bool Table::Save() {

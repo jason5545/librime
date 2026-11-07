@@ -79,28 +79,33 @@ SpellingProperties SpellingAccessor::properties() const {
 Prism::Prism(const path& file_path)
     : MappedFile(file_path), trie_(new Darts::DoubleArray) {}
 
+// 蓬萊：壞掉的檔（截斷、寫壞）一律當成載入失敗：回 false、關檔，不讀到檔案外面，部署看到就重建。
+// prism 很小（蓬萊注音約 140 KB），檔頭指到的雙陣列、拼寫表之外，拼寫表每一項的清單、提示字串、
+// 音節編號也逐筆檢查：清單和字串是最後寫進檔案的，截斷的時候先壞的是它們
 bool Prism::Load() {
   LOG(INFO) << "loading prism file: " << file_path();
 
   if (IsOpen())
     Close();
 
-  if (!OpenReadOnly()) {
-    LOG(ERROR) << "error opening prism file '" << file_path() << "'.";
+  auto fail = [this](const char* message) {
+    LOG(ERROR) << message << " prism file: '" << file_path() << "'.";
+    Close();
+    metadata_ = nullptr;
+    spelling_map_ = nullptr;
+    trie_->clear();
     return false;
-  }
+  };
 
+  if (!OpenReadOnly())
+    return fail("error opening");
+  if (file_size() < sizeof(prism::Metadata))
+    return fail("metadata not found in");
   metadata_ = Find<prism::Metadata>(0);
-  if (!metadata_) {
-    LOG(ERROR) << "metadata not found.";
-    Close();
-    return false;
-  }
-  if (strncmp(metadata_->format, kPrismFormatPrefix, kPrismFormatPrefixLen)) {
-    LOG(ERROR) << "invalid metadata.";
-    Close();
-    return false;
-  }
+  if (!metadata_)
+    return fail("metadata not found in");
+  if (strncmp(metadata_->format, kPrismFormatPrefix, kPrismFormatPrefixLen))
+    return fail("invalid metadata in");
   format_ = atof(&metadata_->format[kPrismFormatPrefixLen]);
 
   // 版本檢查: 強制重構舊版本
@@ -108,23 +113,41 @@ bool Prism::Load() {
     LOG(INFO) << "prism format " << format_ << " is too old. upgrading to "
               << kPrismFormatVersion;
     Close();
+    metadata_ = nullptr;
     return false;
   }
 
   char* array = metadata_->double_array.get();
-  if (!array) {
-    LOG(ERROR) << "double array image not found.";
-    Close();
-    return false;
-  }
   size_t array_size = metadata_->double_array_size;
+  if (!array || array_size == 0 ||
+      !InBounds(array, trie_->unit_size(), array_size))
+    return fail("double array image not found in");
+  if (!std::memchr(metadata_->alphabet, 0, sizeof(metadata_->alphabet)))
+    return fail("invalid alphabet in");
   LOG(INFO) << "found double array image of size " << array_size << ".";
-  trie_->set_array(array, array_size);
 
-  spelling_map_ = NULL;
+  prism::SpellingMap* spelling_map = nullptr;
   if (format_ > 1.0 - DBL_EPSILON) {
-    spelling_map_ = metadata_->spelling_map.get();
+    spelling_map = metadata_->spelling_map.get();
   }
+  if (spelling_map) {
+    if (!ArrayInBounds(spelling_map))
+      return fail("spelling map out of bounds in");
+    const SyllableId num_syllables =
+        static_cast<SyllableId>(metadata_->num_syllables);
+    for (const auto& item : *spelling_map) {
+      if (!ListInBounds(item))
+        return fail("spelling descriptors out of bounds in");
+      for (const auto& desc : item) {
+        if (desc.syllable_id < 0 || desc.syllable_id >= num_syllables ||
+            !StringInBounds(desc.tips))
+          return fail("invalid spelling descriptor in");
+      }
+    }
+  }
+
+  trie_->set_array(array, array_size);
+  spelling_map_ = spelling_map;
   return true;
 }
 

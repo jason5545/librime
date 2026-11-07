@@ -282,6 +282,7 @@ class Table : public MappedFile {
   bool OnBuildStart();
   bool OnBuildFinish();
   bool OnLoad();
+  void Unload();
 
  protected:
   table::Metadata* metadata_ = nullptr;

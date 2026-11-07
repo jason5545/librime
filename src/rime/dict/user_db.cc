@@ -206,10 +206,19 @@ bool UserDbMerger::MetaPut(const string& key, const string& value) {
   return true;
 }
 
+// 蓬萊：一邊刪掉（commits 是負的）、一邊還在用（正的）時，留著還是刪掉照時間判斷，不再只比絕對值
+// （原本本機刪掉的 −5 遇到對方的 9 就變回 9、刪掉的詞回來；對方很久以前刪掉的 −9 會蓋掉本機最近打過的 5）。
+// 時間比的是兩邊詞條的 tick 本身：同步合併後學習紀錄的 tick 取兩邊大的（CloseMerge），之後各自往上加，
+// 跟 Lamport 時鐘一樣，同步過的兩台、還有自己上一次的快照（每次同步都會合併回來），tick 大的就是後發生的。
+// 不換成「距離各自的 tick 多遠」：快照的 tick 是寫快照那時候的，拿它當現在，同步之後才刪的詞會被自己的舊快照救回來。
+// 一樣大時刪掉的贏：刪除不會讓 tick 加一，同一台上刪除跟它前一次打字的 tick 相同、發生在後面。
+// 絕對值（打過幾次）照舊取大的，只決定正負號；兩邊同號、有一邊是 0 或本機沒有這筆時跟原本一樣
 bool UserDbMerger::Put(const string& key, const string& value) {
   if (!db_)
     return false;
   UserDbValue v(value);
+  const TickCount v_tick =
+      (their_tick_ && v.tick > their_tick_) ? their_tick_ : v.tick;
   if (v.tick < their_tick_) {
     v.dee = algo::formula_d(0, (double)their_tick_, v.dee, (double)v.tick);
   }
@@ -218,11 +227,20 @@ bool UserDbMerger::Put(const string& key, const string& value) {
   if (db_->Fetch(key, &our_value)) {
     o.Unpack(our_value);
   }
+  const TickCount o_tick = o.tick > our_tick_ ? our_tick_ : o.tick;
   if (o.tick < our_tick_) {
     o.dee = algo::formula_d(0, (double)our_tick_, o.dee, (double)o.tick);
   }
-  if (std::abs(o.commits) < std::abs(v.commits))
+  if (their_tick_ && o.commits != 0 && v.commits != 0 &&
+      (o.commits < 0) != (v.commits < 0)) {
+    const int magnitude = (std::max)(std::abs(o.commits), std::abs(v.commits));
+    const bool deleted = v_tick > o_tick   ? v.commits < 0
+                         : o_tick > v_tick ? o.commits < 0
+                                           : true;
+    o.commits = deleted ? -magnitude : magnitude;
+  } else if (std::abs(o.commits) < std::abs(v.commits)) {
     o.commits = v.commits;
+  }
   o.dee = (std::max)(o.dee, v.dee);
   o.tick = max_tick_;
   return db_->Update(key, o.Pack()) && ++merged_entries_;

@@ -123,7 +123,7 @@ class UserDbMerger : public Sink {
   TickCount our_tick_;
   TickCount their_tick_;
   TickCount max_tick_;
-  int merged_entries_;
+  int merged_entries_ = 0;  // 蓬萊：原本沒有初始值
 };
 
 class UserDbImporter : public Sink {

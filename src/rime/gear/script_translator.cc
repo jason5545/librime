@@ -203,6 +203,30 @@ static bool syllabify_dfs(SyllabifyTask* task,
   return false;
 }
 
+// 蓬萊：英文詞的每個字母是一個假音節（注音＋~，gen_en_dict.py）。移游標時同一個英文詞的字母不拆開：
+// 兩個假音節中間、又不是詞的邊界（word_ends）的切點拿掉。vertices 是每個音節的邊界（比 code 多一個）
+static void MergeLetterVertices(Table* table,
+                                const Code& code,
+                                const vector<size_t>& word_ends,
+                                vector<size_t>* vertices) {
+  if (!table || vertices->size() != code.size() + 1 || code.size() < 2)
+    return;
+  auto letter = [&](size_t k) {
+    string syllable = table->GetSyllableById(code[k]);
+    return !syllable.empty() && syllable.back() == '~';
+  };
+  vector<size_t> merged{vertices->front()};
+  for (size_t k = 1; k < code.size(); ++k) {
+    size_t v = (*vertices)[k];
+    if (letter(k - 1) && letter(k) &&
+        std::find(word_ends.begin(), word_ends.end(), v) == word_ends.end())
+      continue;
+    merged.push_back(v);
+  }
+  merged.push_back(vertices->back());
+  vertices->swap(merged);
+}
+
 }  // anonymous namespace
 
 class ScriptSyllabifier : public PhraseSyllabifier {
@@ -1570,6 +1594,19 @@ Spans ScriptSyllabifier::Syllabify(const Phrase* phrase) {
           size_t next_pos) { vertices.push_back(start_ + next_pos); },
       [&](SyllabifyTask* task, size_t depth) { vertices.pop_back(); }};
   if (syllabify_dfs(&task, 0, phrase->start() - start_)) {
+    // 蓬萊：整句裡的英文詞（english_lexicon）一次跳一個詞，不是一個字母一個字母跳
+    vector<size_t> word_ends;
+    if (auto sentence = dynamic_cast<const Sentence*>(phrase)) {
+      size_t pos = phrase->start();
+      for (size_t len : sentence->word_lengths()) {
+        pos += len;
+        word_ends.push_back(pos);
+      }
+    }
+    an<Table> table;
+    if (translator_->dict())
+      table = translator_->dict()->primary_table();
+    MergeLetterVertices(table.get(), phrase->code(), word_ends, &vertices);
     result.set_vertices(std::move(vertices));
   }
   return result;
@@ -2870,6 +2907,110 @@ class EnglishSyllabifier : public PhraseSyllabifier {
   vector<size_t> vertices_;
 };
 
+// 蓬萊：英文段組成的整句（MakeEnglishCandidates 的 compose）移游標的切點。英文詞（數字）一次跳一個詞；
+// 中文那幾段照音節一個一個跳（原本只放詞的邊界，兩個音節的中文詞一按就整個跳過）。
+// 中文段照 EnrollSegment 的切法重切一次音節圖、照詞的碼找路；按 ← 才算（Navigator::BeginMove），打字時不多花工夫。
+// 找不到路就退回詞的邊界
+class MixedSyllabifier : public PhraseSyllabifier {
+ public:
+  struct Part {
+    size_t start;   // 在 input 裡的位置（還沒加 start）
+    size_t length;
+    bool english;
+    Code code;
+  };
+  MixedSyllabifier(ScriptTranslator* translator,
+                   Corrector* corrector,
+                   const string& input,
+                   size_t start,
+                   vector<Part> parts)
+      : translator_(translator),
+        corrector_(corrector),
+        input_(input),
+        start_(start),
+        parts_(std::move(parts)) {}
+  Spans Syllabify(const Phrase* phrase) override {
+    vector<size_t> vertices{start_};
+    size_t i = 0;
+    while (i < parts_.size()) {
+      if (parts_[i].english) {
+        vertices.push_back(start_ + parts_[i].start + parts_[i].length);
+        ++i;
+        continue;
+      }
+      // 連著的中文詞是同一段（EnrollSegment 的一段）
+      size_t j = i;
+      Code code;
+      vector<size_t> word_ends;
+      while (j < parts_.size() && !parts_[j].english) {
+        code.insert(code.end(), parts_[j].code.begin(), parts_[j].code.end());
+        word_ends.push_back(parts_[j].start + parts_[j].length);
+        ++j;
+      }
+      vector<size_t> inner;
+      if (SyllabifySegment(parts_[i].start, word_ends.back(), code, word_ends,
+                           &inner)) {
+        for (size_t v : inner)
+          vertices.push_back(start_ + v);
+      } else {
+        for (size_t v : word_ends)
+          vertices.push_back(start_ + v);
+      }
+      i = j;
+    }
+    Spans spans;
+    spans.set_vertices(std::move(vertices));
+    return spans;
+  }
+
+ private:
+  // seg_start 到 seg_end 這段的音節邊界（不含 seg_start，含 seg_end），位置是 input 裡的
+  bool SyllabifySegment(size_t seg_start,
+                        size_t seg_end,
+                        const Code& code,
+                        const vector<size_t>& word_ends,
+                        vector<size_t>* out) {
+    Dictionary* dict = translator_->dict();
+    if (!dict || !dict->prism() || code.empty() || seg_end <= seg_start)
+      return false;
+    bool is_rear = seg_end == input_.length();
+    Syllabifier syllabifier(translator_->delimiters(),
+                            is_rear && translator_->enable_completion(),
+                            translator_->strict_spelling());
+    if (corrector_)
+      syllabifier.EnableCorrection(corrector_);
+    syllabifier.SetGlueSpellings(translator_->glue_spellings());
+    SyllableGraph graph;
+    string seg = input_.substr(seg_start, seg_end - seg_start);
+    if (syllabifier.BuildSyllableGraph(seg, *dict->prism(), &graph) !=
+        seg.length())
+      return false;
+    vector<size_t> vertices{seg_start};
+    SyllabifyTask task{
+        code, graph, seg.length(),
+        [&](SyllabifyTask* task, size_t depth, size_t current_pos,
+            size_t next_pos) { vertices.push_back(seg_start + next_pos); },
+        [&](SyllabifyTask* task, size_t depth) { vertices.pop_back(); }};
+    if (!syllabify_dfs(&task, 0, 0))
+      return false;
+    // 每個詞的邊界都要在路上（不然音節圖跟查詞時切得不一樣，退回詞的邊界）
+    for (size_t v : word_ends) {
+      if (std::find(vertices.begin(), vertices.end(), v) == vertices.end())
+        return false;
+    }
+    MergeLetterVertices(dict->primary_table().get(), code, word_ends,
+                        &vertices);
+    out->assign(vertices.begin() + 1, vertices.end());
+    return true;
+  }
+
+  ScriptTranslator* translator_;
+  Corrector* corrector_;
+  string input_;
+  size_t start_;
+  vector<Part> parts_;
+};
+
 inline bool is_lowercase_letter(char c) {
   return c >= 'a' && c <= 'z';
 }
@@ -3160,7 +3301,7 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
       return nullptr;
     // 組字區：中文段照 preedit_format 顯示注音，英文照字面，詞跟詞之間放分隔符號
     string preedit;
-    vector<size_t> vertices{start_};
+    vector<MixedSyllabifier::Part> parts;
     size_t p = 0;
     for (size_t k = 0; k < sentence->size(); ++k) {
       size_t len = sentence->word_lengths()[k];
@@ -3172,12 +3313,14 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
         preedit += separator;
       preedit += english ? input_.substr(p, len)
                          : translator_->FormatPreedit(input_.substr(p, len));
+      parts.push_back({p, len, english,
+                       english ? Code() : sentence->components()[k].code});
       p += len;
-      vertices.push_back(start_ + p);
     }
     sentence->Offset(start_);
     sentence->set_preedit(preedit);
-    sentence->set_syllabifier(New<EnglishSyllabifier>(std::move(vertices)));
+    sentence->set_syllabifier(New<MixedSyllabifier>(
+        translator_, corrector_, input_, start_, std::move(parts)));
     return sentence;
   };
   vector<Made> made;

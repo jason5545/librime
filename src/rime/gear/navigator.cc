@@ -208,12 +208,20 @@ void Navigator::BeginMove(Context* ctx) {
         spans_.AddVertex(covered);
       }
       // 蓬萊：反白的候選只蓋住前段時（翻頁、↑↓ 移到短的詞），後段沒有切點，← 會一下跳到那個詞後面、
-      // 中間的音節全跳過。後段照第一個候選（通常是整句）的切點
+      // 中間的音節全跳過。後段借反白之前的候選的切點（0063）。
+      // 只借在反白結尾也有切點的候選（0070）：不然會借到另一條切法（dangan 反白「但」dan，
+      // 第一個「檔案」是 dang|an，借來就多一個 dang 後面的切點；往下找到「單幹」dan|gan 才借）。
+      // 只看反白之前的候選，都已經算好了，不會多翻譯；一個都沒有就跟上游一樣，後段不加切點
       if (covered < seg.end && seg.menu) {
-        auto top = As<Phrase>(
-            Candidate::GetGenuineCandidate(seg.menu->GetCandidateAt(0)));
-        if (top && top != selected && top->start() <= covered) {
-          Spans rest = top->spans();
+        for (size_t i = 0; i < seg.selected_index; ++i) {
+          auto cand = As<Phrase>(
+              Candidate::GetGenuineCandidate(seg.menu->GetCandidateAt(i)));
+          if (!cand || cand == selected || cand->start() > covered ||
+              cand->end() <= covered)
+            continue;
+          Spans rest = cand->spans();
+          if (!rest.HasVertex(covered))
+            continue;
           for (size_t pos = covered;;) {
             size_t next = rest.NextStop(pos);
             if (next == pos || next > seg.end)
@@ -221,6 +229,7 @@ void Navigator::BeginMove(Context* ctx) {
             spans_.AddVertex(next);
             pos = next;
           }
+          break;
         }
       }
       spans_.AddSpan(seg.start, seg.end);

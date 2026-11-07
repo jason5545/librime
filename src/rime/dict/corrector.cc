@@ -367,17 +367,26 @@ string ZhuyinToKeys(const string& zhuyin) {
 namespace {
 thread_local const vector<string>* g_touches = nullptr;
 thread_local size_t g_touch_offset = 0;
+thread_local bool g_touch_full_style = false;
 }  // namespace
 
-TouchScope::TouchScope(const vector<string>* touches, size_t offset)
-    : saved_touches_(g_touches), saved_offset_(g_touch_offset) {
+TouchScope::TouchScope(const vector<string>* touches, size_t offset, bool full_style)
+    : saved_touches_(g_touches),
+      saved_offset_(g_touch_offset),
+      saved_full_style_(g_touch_full_style) {
   g_touches = touches;
   g_touch_offset = offset;
+  g_touch_full_style = full_style;
 }
 
 TouchScope::~TouchScope() {
   g_touches = saved_touches_;
   g_touch_offset = saved_offset_;
+  g_touch_full_style = saved_full_style_;
+}
+
+bool TouchScope::FullStyle() {
+  return g_touch_full_style;
 }
 
 const string* TouchScope::At(size_t pos) {
@@ -431,7 +440,13 @@ bool PenglaiKeyCorrector::TouchSubstitutes(size_t pos,
     cost = (std::min)(cost, -1e-4);
     if (cost < -12.0)
       continue;
-    out->push_back({k.first, cost, k.second - typed_d2 <= options_.touch_near});
+    const double diff = k.second - typed_d2;
+    // 只打完整注音的人，聲調鍵按偏落在旁邊的聲母（ㄉ、ㄓ）上多半就是按偏，照 touch_near 算打完音節；
+    // 其他人那一鍵多半就是下一個字的首注音，要按得更靠近聲調鍵（touch_close）
+    const double close = TouchScope::FullStyle()
+                             ? options_.touch_near
+                             : (std::min)(options_.touch_near, options_.touch_close);
+    out->push_back({k.first, cost, diff <= options_.touch_near, diff <= close});
   }
   return true;
 }
@@ -563,14 +578,20 @@ void PenglaiKeyCorrector::ScoredSearch(const Prism& prism,
     State s{node, next_pos, from.score + cost,
             from.edits + (cost < 0 && !(op & kOpTouch) ? 1 : 0), from.depth + 1,
             static_cast<int>(val >= 0 ? val : -1), from.omission || omission,
-            from.ops | op, (op == 0 || (op & kOpTouch)) && IsIn(" 6347", c),
+            from.ops | op, (op == 0 || (op & kOpTouchClose)) && IsIn(" 6347", c),
             from.has_final || (!IsIn(kInitialKeys, c) && !IsIn(" 6347", c)),
             from.depth == 0 ? IsIn(kInitialKeys, c) : from.initial};
     s.touch_edits = from.touch_edits + ((op & kOpTouch) ? 1 : 0);
     if (s.edits > max_edits || s.edits + s.touch_edits > total_max ||
         s.score < kFloor)
       return;
-    if (val >= 0 && s.edits + s.touch_edits > 0 && (s.closed || (untoned_ok && Untoned(s.ops, s.has_final && s.initial)))) {
+    // 觸控的簡拼：一個鍵的聲母照觸控換成附近的聲母（打的那一鍵也是聲母）
+    const bool touch_abbrev = s.depth == 1 && TouchAbbreviation(s.ops) &&
+                              IsIn(kInitialKeys, c) &&
+                              IsIn(kInitialKeys, input[from.pos]);
+    if (val >= 0 && s.edits + s.touch_edits > 0 &&
+        (s.closed || touch_abbrev ||
+         (untoned_ok && Untoned(s.ops, s.has_final && s.initial)))) {
       Correction c{static_cast<size_t>(s.edits + s.touch_edits), static_cast<SyllableId>(val),
                    s.pos - begin, s.score, true};
       c.closed = s.closed;
@@ -600,7 +621,9 @@ void PenglaiKeyCorrector::ScoredSearch(const Prism& prism,
         if (TouchSubstitutes(st.pos, typed, &touch_alts)) {
           for (const auto& alt : touch_alts)
             step(st, alt.key, st.pos + 1, alt.cost,
-                 kOpSubstitution | (alt.near ? kOpTouch : 0), &next);
+                 kOpSubstitution | kOpTouchSub | (alt.near ? kOpTouch : 0) |
+                     (alt.close ? kOpTouchClose : 0),
+                 &next);
         } else {
           auto sub = substitutes_.find(typed);
           if (sub != substitutes_.end())
@@ -695,6 +718,8 @@ Corrector* CorrectorComponent::Create(const Ticket& ticket) noexcept {
       config->GetDouble(ticket.name_space + "/key_model/touch_prior", &o.touch_prior);
       config->GetDouble(ticket.name_space + "/key_model/touch_valid", &o.touch_valid);
       config->GetDouble(ticket.name_space + "/key_model/touch_near", &o.touch_near);
+      config->GetDouble(ticket.name_space + "/key_model/touch_close", &o.touch_close);
+      config->GetBool(ticket.name_space + "/key_model/touch_abbreviations", &o.touch_abbreviations);
       config->GetInt(ticket.name_space + "/key_model/touch_max_edits", &o.touch_max_edits);
       if (auto list = config->GetList(ticket.name_space + "/key_model/fuzzy_pairs")) {
         for (size_t i = 0; i < list->size(); ++i) {

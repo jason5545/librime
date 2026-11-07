@@ -1655,7 +1655,8 @@ size_t ScriptSyllabifier::BuildSyllableGraph(Prism& prism) {
         ctx->touches().size() == all.size())
       touches = &ctx->touches();
   }
-  TouchScope touch_scope(touches, start_);
+  TouchScope touch_scope(touches, start_,
+                         touches && translator_->typing_style() == "full");
   return (size_t)syllabifier_.BuildSyllableGraph(input_, prism,
                                                  &syllable_graph_);
 }

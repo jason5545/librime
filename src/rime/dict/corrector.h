@@ -104,6 +104,8 @@ class Corrector : public Class<Corrector, const Ticket&> {
   virtual bool RequiresTone() const { return false; }
   // 蓬萊：修過的詞要不要在註解寫上修成的讀音
   virtual bool ShowReading() const { return false; }
+  // 蓬萊：觸控的簡拼（一個鍵的聲母照觸控換成附近的聲母），沒打聲調也收
+  virtual bool IsTouchAbbreviation(unsigned ops) const { return false; }
 };
 
 // 蓬萊：按鍵模型（照 Google 注音的做法：每一鍵都是機率，跟語言模型分數一起排）。
@@ -114,14 +116,18 @@ class Corrector : public Class<Corrector, const Ticket&> {
 // 整串輸入的起點），PenglaiKeyCorrector::ScoredSearch 讀；離開時還原。同一條執行緒同時只會建一張圖
 class RIME_DLL TouchScope {
  public:
-  TouchScope(const vector<string>* touches, size_t offset);
+  // full_style：打法偵測（translator/typing_style）判定這個人只打完整注音。這時觸控換成聲調鍵照 touch_near
+  // 算打完音節、不做觸控的簡拼；其他（只打首注音、混打、還沒判定）照 touch_close、touch_abbreviations
+  TouchScope(const vector<string>* touches, size_t offset, bool full_style = false);
   ~TouchScope();
   // 整串輸入第 offset + pos 個鍵的觸控；沒有就是 nullptr
   static const string* At(size_t pos);
+  static bool FullStyle();
 
  private:
   const vector<string>* saved_touches_;
   size_t saved_offset_;
+  bool saved_full_style_;
 };
 
 class RIME_DLL PenglaiKeyCorrector : public Corrector {
@@ -154,15 +160,27 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
     // 照打合法時的建議詞（整段一個詞）分數贏過最好的整句時可以排第一；預設不行，最多排第二
     bool valid_first = false;
     // 觸控（手機前端傳了按下去的位置時取代上面的鍵距）：本來要按 k、按到 typed 的機率
-    // = touch_prior × exp(−(d²(k) − d²(typed)) / (2 touch_sigma²))，d 是按下去的位置到鍵中心的距離（鍵寬為 1）
-    double touch_sigma = 0.35;
+    // = touch_prior × exp(−(d²(k) − d²(typed)) / (2 touch_sigma²))，d 是按下去的位置到鍵中心的距離（鍵寬為 1）。
+    // 0.25（0069，原本 0.35）：Gboard 的觸控空間模型每個鍵是 mm 單位的二維常態分布，σx² = 0.0075·(1.5×鍵寬)² + 1.68、
+    // σy² = 0.0108·(1.5×鍵高)² + 1.33；POCO F8 Ultra 上蓬萊注音鍵盤的鍵 7.27×9.09 mm 代進去是 σx 0.22、σy 0.25 鍵寬。
+    // 0.35 寬了一倍半，按得準的時候照打合法的也常被換掉（空學習紀錄、打對的長句 622 句改壞 63 句）。
+    // 取 0.25 不取 0.22：手指不穩（雜訊 0.35 鍵寬）時 0.22 救回的少，Jason 實際按多偏還沒量（前端 TouchStats 在量）
+    double touch_sigma = 0.25;
     double touch_prior = 1.0;
     // 照打本身是完整音節、但按下去的位置離別的鍵也近時：容錯的機率再乘這個（取代 valid），而且進整句、不只當建議。
-    // 按下去的位置就是證據（實體鍵盤沒有，所以照打合法時只當建議）
-    double touch_valid = 1.0;
+    // 按下去的位置就是證據（實體鍵盤沒有，所以照打合法時只當建議）。0.1（0069，原本 1，不扣）：照打合法時還是要扣一點，
+    // 不然「上個」「開個」這種讀音比重 0% 的照打（個 ㄍㄜ˙）一按偏就被換成「上格」「開格」
+    double touch_valid = 0.1;
     // 按下去的位置要多靠近另一鍵才算上一條的證據：d²(k) − d²(typed) 不超過這個（鍵寬為 1；兩鍵中心連線上
     // 離打出來的鍵中心 x 時是 1 − 2x，0.95 是偏了 0.025 鍵寬）。按在鍵中間的照實體鍵盤的規則（valid、只當建議）
     double touch_near = 0.95;
+    // 觸控換成聲調鍵時，要多靠近那個聲調鍵才算「打完這個音節」（同一個量 d²(k) − d²(typed)；0.4 是離兩鍵交界
+    // 0.2 鍵寬以內）。比 touch_near 嚴：ㄉ、ㄓ、ㄚ 緊鄰聲調鍵，只打首注音的「可以的」（ㄎ ㄧ ㄉ）按在 ㄉ 偏右，
+    // 照 touch_near 就會被讀成「可以」（ㄎ ㄧˇ），最後的「的」不見（11/7 Jason「用起來怪怪的」調查）
+    double touch_close = 0.4;
+    // 觸控的簡拼：只打第一個注音的聲母（一個鍵）也照按下去的位置換成附近的聲母（Gboard 的單獨聲母也有觸控的
+    // 鄰鍵）。只收聲母換聲母、整個拼法就是那一鍵；照打的聲母本身是合法的簡拼，跟照打合法一樣扣 touch_valid
+    bool touch_abbreviations = true;
     // 一個音節最多錯幾次，算上觸控靠近另一鍵的換鍵（那種換鍵不佔 max_edits）
     int touch_max_edits = 2;
   };
@@ -173,6 +191,8 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
     kOpDouble = 8,
     kOpOmission = 16,
     kOpTouch = 32,  // 按到旁邊的鍵，照觸控按下去的位置算的（跟 kOpSubstitution 一起）
+    kOpTouchClose = 64,  // 觸控換成聲調鍵、而且按得夠靠近（touch_close）：算打完音節（跟 kOpTouch 一起）
+    kOpTouchSub = 128,  // 換鍵照觸控算的（不管靠不靠近；跟 kOpSubstitution 一起）
   };
   explicit PenglaiKeyCorrector(const Options& options);
   void ToleranceSearch(const Prism& prism,
@@ -189,6 +209,9 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
   bool ValidFirst() const override { return options_.valid_first; }
   bool RequiresTone() const override { return options_.require_tone; }
   bool ShowReading() const override { return options_.show_reading; }
+  bool IsTouchAbbreviation(unsigned ops) const override {
+    return TouchAbbreviation(ops);
+  }
   double ValidPenalty() const override {
     if (options_.valid <= 0)
       return -std::numeric_limits<double>::infinity();  // 照打合法時不修
@@ -214,6 +237,8 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
     if (!closed && ops == kOpFuzzy && options_.fuzzy_untoned &&
         options_.require_tone)
       return true;
+    if (TouchAbbreviation(ops))
+      return true;
     if (options_.abbreviations == "all")
       return !(ops & kOpOmission);
     if (options_.abbreviations == "double")
@@ -222,12 +247,19 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
   }
 
  private:
+  // 觸控的簡拼（touch_abbreviations）：只有照觸控換鍵，沒有別的錯
+  bool TouchAbbreviation(unsigned ops) const {
+    return options_.touch_abbreviations && !TouchScope::FullStyle() &&
+           (ops & kOpTouchSub) &&
+           !(ops & ~(kOpSubstitution | kOpTouch | kOpTouchClose | kOpTouchSub));
+  }
   bool Untoned(unsigned ops, bool has_final) const;
   // 這一鍵有觸控時，照按下去的位置算換成附近各鍵的機率；沒有觸控（或格式不對）回 false，用鍵距表
   struct TouchAlt {
     char key;
     double cost;
     bool near;  // 按下去的位置靠近這一鍵（kOpTouch）
+    bool close;  // 更靠近（touch_close）：換成聲調鍵時算打完音節（kOpTouchClose）
   };
   bool TouchSubstitutes(size_t pos, char typed, vector<TouchAlt>* out) const;
   Options options_;

@@ -64,6 +64,9 @@ class RIME_DLL Context {
 
   void set_input(const string& value);
   const string& input() const { return input_; }
+  // 蓬萊：觸控（手機前端）。每個輸入鍵按下去的位置離附近各鍵中心多遠，跟 input_ 一一對應（實體鍵盤是空字串）。
+  // 前端在 process_key 之前 set_property("penglai_touch", "<鍵>:<距離平方> …")，這一鍵進到輸入時記下來
+  const vector<string>& touches() const { return touches_; }
 
   void set_caret_pos(size_t caret_pos);
   size_t caret_pos() const { return caret_pos_; }
@@ -104,8 +107,12 @@ class RIME_DLL Context {
 
  private:
   string GetSoftCursor() const;
+  void SyncTouches();
+  string TakeTouch();
 
   string input_;
+  vector<string> touches_;
+  string pending_touch_;
   size_t caret_pos_ = 0;
   Composition composition_;
   an<RawInputFormat> raw_input_format_;

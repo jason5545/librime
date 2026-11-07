@@ -82,6 +82,8 @@ class ScriptTranslator : public Translator,
   // 蓬萊：打法模型（docs/optimization.md 第 6 項）。這次切音節要不要把罕用黏合音節（translator/glue_syllables）
   // 改成簡拼類型：打法是 full（只打完整、有聲調的注音）時不改，其他（unknown、abbrev、偵測關掉）照改。nullptr＝不改
   const hash_set<SyllableId>* glue_spellings();
+  // 蓬萊：觸控（ScriptSyllabifier 讀 Context::touches）
+  Context* input_context() const;
   // 打法偵測現在的狀態：off（translator/typing_style 是 off 或沒寫）、unknown、full、abbrev
   string typing_style() const;
   // 蓬萊：英文單字進整句

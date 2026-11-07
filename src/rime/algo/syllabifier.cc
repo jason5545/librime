@@ -207,7 +207,7 @@ int Syllabifier::BuildSyllableGraph(const string& input,
           continue;
         // 蓬萊：照打的那段就是完整音節、設定成照打合法時不修
         if (scored && exact_normal_lengths.count(c.length) &&
-            !std::isfinite(corrector_->ValidPenalty()))
+            !std::isfinite(corrector_->ValidPenaltyFor(c.ops)))
           continue;
         for (auto accessor = prism.QuerySpelling(c.syllable);
              !accessor.exhausted(); accessor.Next()) {
@@ -280,10 +280,11 @@ int Syllabifier::BuildSyllableGraph(const string& input,
                 props.is_correction = true;
                 props.credibility += sc->second.score;
                 if (exact_normal_lengths.count(m.length)) {
-                  props.credibility += corrector_->ValidPenalty();
-                  if (corrector_->ValidSuggest())
+                  const unsigned ops = sc->second.ops;
+                  props.credibility += corrector_->ValidPenaltyFor(ops);
+                  if (corrector_->ValidSuggestFor(ops))
                     graph->weak.insert(std::make_tuple(current_pos, end_pos, syllable_id));
-                  if (corrector_->ValidSuggest() && !sc->second.closed)
+                  if (corrector_->ValidSuggestFor(ops) && !sc->second.closed)
                     graph->weak_untoned.insert(std::make_tuple(current_pos, end_pos, syllable_id));
                 }
               } else {

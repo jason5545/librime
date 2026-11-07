@@ -8,6 +8,7 @@
 #include "corrector.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <numeric>
@@ -363,6 +364,78 @@ string ZhuyinToKeys(const string& zhuyin) {
 
 }  // namespace
 
+namespace {
+thread_local const vector<string>* g_touches = nullptr;
+thread_local size_t g_touch_offset = 0;
+}  // namespace
+
+TouchScope::TouchScope(const vector<string>* touches, size_t offset)
+    : saved_touches_(g_touches), saved_offset_(g_touch_offset) {
+  g_touches = touches;
+  g_touch_offset = offset;
+}
+
+TouchScope::~TouchScope() {
+  g_touches = saved_touches_;
+  g_touch_offset = saved_offset_;
+}
+
+const string* TouchScope::At(size_t pos) {
+  if (!g_touches)
+    return nullptr;
+  size_t i = g_touch_offset + pos;
+  if (i >= g_touches->size() || (*g_touches)[i].empty())
+    return nullptr;
+  return &(*g_touches)[i];
+}
+
+// 觸控字串：空白隔開的「鍵:距離平方」，距離以鍵寬為 1（例：q:0.04 a:0.81 w:0.9）。要有打出來的那個鍵
+bool PenglaiKeyCorrector::TouchSubstitutes(size_t pos,
+                                           char typed,
+                                           vector<TouchAlt>* out) const {
+  const string* touch = TouchScope::At(pos);
+  if (!touch || options_.touch_prior <= 0)
+    return false;
+  vector<pair<char, double>> keys;
+  const char* p = touch->c_str();
+  while (*p) {
+    while (*p == ' ')
+      ++p;
+    if (!*p)
+      break;
+    char k = *p++;
+    if (*p != ':')
+      return false;
+    ++p;
+    char* end = nullptr;
+    double d2 = std::strtod(p, &end);
+    if (end == p)
+      return false;
+    p = end;
+    keys.emplace_back(k, d2);
+  }
+  double typed_d2 = -1;
+  for (const auto& k : keys)
+    if (k.first == typed)
+      typed_d2 = k.second;
+  if (typed_d2 < 0)
+    return false;
+  const double sigma = options_.touch_sigma > 0 ? options_.touch_sigma : 0.35;
+  const double lp = std::log(options_.touch_prior);
+  out->clear();
+  for (const auto& k : keys) {
+    if (k.first == typed)
+      continue;
+    double cost = lp - (k.second - typed_d2) / (2 * sigma * sigma);
+    // 容錯一定要扣分（step 用 cost < 0 算錯了幾次）；太不可能的不走
+    cost = (std::min)(cost, -1e-4);
+    if (cost < -12.0)
+      continue;
+    out->push_back({k.first, cost, k.second - typed_d2 <= options_.touch_near});
+  }
+  return true;
+}
+
 PenglaiKeyCorrector::PenglaiKeyCorrector(const Options& options)
     : options_(options) {
   auto safe_log = [](double p) {
@@ -437,6 +510,8 @@ void PenglaiKeyCorrector::ScoredSearch(const Prism& prism,
     return;
   const auto& trie = prism.trie();
   const int max_edits = options_.max_edits;
+  // 觸控靠近另一鍵的換鍵（kOpTouch）另外算，一個音節總共最多 touch_max_edits 次；其他錯照舊最多 max_edits 次
+  const int total_max = (std::max)(max_edits, options_.touch_max_edits);
   const double kFloor = -20.0;
   // 沒打聲調的模糊音，整串裡有單獨一個介音或韻母的零聲母字（開頭、聲調後或韻母後的一個鍵，後面接聲母或
   // 結尾：ㄨ ㄗ ㄚ 是「我在啊」，ㄗㄚ 不是一個音節）就不修。打完整注音時「一」「啊」這種一個鍵的字也會被當成
@@ -469,10 +544,12 @@ void PenglaiKeyCorrector::ScoredSearch(const Prism& prism,
     bool closed;  // 最後一步是照打的聲調鍵
     bool has_final;  // 拼法裡有聲母以外的注音（介音、韻母）
     bool initial;    // 拼法的第一個鍵是聲母
+    int touch_edits = 0;  // 觸控靠近另一鍵的換鍵次數（不算在 edits 裡）
   };
   vector<State> stack;
   stack.push_back({0, begin, 0.0, 0, 0, -1, false, 0, false, false, false});
   map<pair<size_t, size_t>, double> best;  // (節點, 位置) → 最佳分數（同樣錯幾次以內）
+  vector<TouchAlt> touch_alts;
 
   auto step = [&](const State& from, char c, size_t next_pos, double cost,
                   unsigned op, vector<State>* out) {
@@ -484,15 +561,17 @@ void PenglaiKeyCorrector::ScoredSearch(const Prism& prism,
     if (val == -2)
       return;
     State s{node, next_pos, from.score + cost,
-            from.edits + (cost < 0 ? 1 : 0), from.depth + 1,
+            from.edits + (cost < 0 && !(op & kOpTouch) ? 1 : 0), from.depth + 1,
             static_cast<int>(val >= 0 ? val : -1), from.omission || omission,
-            from.ops | op, op == 0 && IsIn(" 6347", c),
+            from.ops | op, (op == 0 || (op & kOpTouch)) && IsIn(" 6347", c),
             from.has_final || (!IsIn(kInitialKeys, c) && !IsIn(" 6347", c)),
             from.depth == 0 ? IsIn(kInitialKeys, c) : from.initial};
-    if (s.edits > max_edits || s.score < kFloor)
+    s.touch_edits = from.touch_edits + ((op & kOpTouch) ? 1 : 0);
+    if (s.edits > max_edits || s.edits + s.touch_edits > total_max ||
+        s.score < kFloor)
       return;
-    if (val >= 0 && s.edits > 0 && (s.closed || (untoned_ok && Untoned(s.ops, s.has_final && s.initial)))) {
-      Correction c{static_cast<size_t>(s.edits), static_cast<SyllableId>(val),
+    if (val >= 0 && s.edits + s.touch_edits > 0 && (s.closed || (untoned_ok && Untoned(s.ops, s.has_final && s.initial)))) {
+      Correction c{static_cast<size_t>(s.edits + s.touch_edits), static_cast<SyllableId>(val),
                    s.pos - begin, s.score, true};
       c.closed = s.closed;
       c.omission = s.omission;
@@ -516,12 +595,19 @@ void PenglaiKeyCorrector::ScoredSearch(const Prism& prism,
     if (has_input) {
       // 照打的鍵走
       step(st, typed, st.pos + 1, 0.0, 0, &next);
-      if (st.edits < max_edits) {
-        // 按到旁邊的鍵
-        auto sub = substitutes_.find(typed);
-        if (sub != substitutes_.end())
-          for (const auto& alt : sub->second)
-            step(st, alt.first, st.pos + 1, alt.second, kOpSubstitution, &next);
+      if (st.edits + st.touch_edits < total_max) {
+        // 按到旁邊的鍵：有觸控照按下去的位置，沒有照鍵距表
+        if (TouchSubstitutes(st.pos, typed, &touch_alts)) {
+          for (const auto& alt : touch_alts)
+            step(st, alt.key, st.pos + 1, alt.cost,
+                 kOpSubstitution | (alt.near ? kOpTouch : 0), &next);
+        } else {
+          auto sub = substitutes_.find(typed);
+          if (sub != substitutes_.end())
+            for (const auto& alt : sub->second)
+              step(st, alt.first, st.pos + 1, alt.second, kOpSubstitution,
+                   &next);
+        }
         // 模糊音
         auto fz = fuzzy_.find(typed);
         if (fz != fuzzy_.end())
@@ -537,12 +623,13 @@ void PenglaiKeyCorrector::ScoredSearch(const Prism& prism,
           s.score += cost;
           s.edits += 1;
           s.ops |= is_double ? kOpDouble : kOpExtra;
-          if (s.edits <= max_edits && s.score >= kFloor) {
+          if (s.edits <= max_edits && s.edits + s.touch_edits <= total_max &&
+              s.score >= kFloor) {
             // 多按的那一鍵在拼法最後（ㄐㄐ 當一個 ㄐ）：剛走到的節點就是拼法。
             // 多按的是聲調鍵（ˋˋ）時，前一步照打的聲調鍵還算數
             if (is_double && st.value >= 0 &&
                 (st.closed || (untoned_ok && Untoned(s.ops, st.has_final && st.initial)))) {
-              Correction c{static_cast<size_t>(s.edits),
+              Correction c{static_cast<size_t>(s.edits + s.touch_edits),
                            static_cast<SyllableId>(st.value), s.pos - begin,
                            s.score, true};
               c.omission = s.omission;
@@ -555,7 +642,8 @@ void PenglaiKeyCorrector::ScoredSearch(const Prism& prism,
         }
       }
     }
-    if (st.edits < max_edits && has_input) {
+    if (st.edits < max_edits && st.edits + st.touch_edits < total_max &&
+        has_input) {
       // 漏打聲母：音節的第一個鍵，打的是韻母或介音；前一個鍵是聲母時不算（那個聲母多半就是這個音節的，
       // 或是只打第一個注音的字，照打的就讀得通）
       char before = st.pos > 0 ? input[st.pos - 1] : 0;
@@ -603,6 +691,11 @@ Corrector* CorrectorComponent::Create(const Ticket& ticket) noexcept {
       config->GetBool(ticket.name_space + "/key_model/valid_suggest", &o.valid_suggest);
       config->GetBool(ticket.name_space + "/key_model/closed_type", &o.closed_type);
       config->GetBool(ticket.name_space + "/key_model/valid_first", &o.valid_first);
+      config->GetDouble(ticket.name_space + "/key_model/touch_sigma", &o.touch_sigma);
+      config->GetDouble(ticket.name_space + "/key_model/touch_prior", &o.touch_prior);
+      config->GetDouble(ticket.name_space + "/key_model/touch_valid", &o.touch_valid);
+      config->GetDouble(ticket.name_space + "/key_model/touch_near", &o.touch_near);
+      config->GetInt(ticket.name_space + "/key_model/touch_max_edits", &o.touch_max_edits);
       if (auto list = config->GetList(ticket.name_space + "/key_model/fuzzy_pairs")) {
         for (size_t i = 0; i < list->size(); ++i) {
           if (auto v = list->GetValueAt(i))

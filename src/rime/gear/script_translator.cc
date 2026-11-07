@@ -1175,6 +1175,10 @@ an<Translation> ScriptTranslator::Query(const string& input,
   return deduped;
 }
 
+Context* ScriptTranslator::input_context() const {
+  return engine_ ? engine_->context() : nullptr;
+}
+
 SentenceCache* ScriptTranslator::sentence_cache(Dictionary* dict,
                                                UserDictionary* user_dict) {
   SentenceCache::Key key;
@@ -1643,6 +1647,15 @@ void ScriptSyllabifier::CountSpellingTypes(const Phrase& phrase,
 
 size_t ScriptSyllabifier::BuildSyllableGraph(Prism& prism) {
   ++build_count_;
+  // 蓬萊：手機前端傳了觸控時，按鍵模型照每一鍵按下去的位置算（這段輸入要跟整串輸入對得上）
+  const vector<string>* touches = nullptr;
+  if (Context* ctx = translator_->input_context()) {
+    const string& all = ctx->input();
+    if (start_ <= all.size() && all.compare(start_, input_.size(), input_) == 0 &&
+        ctx->touches().size() == all.size())
+      touches = &ctx->touches();
+  }
+  TouchScope touch_scope(touches, start_);
   return (size_t)syllabifier_.BuildSyllableGraph(input_, prism,
                                                  &syllable_graph_);
 }

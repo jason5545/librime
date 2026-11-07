@@ -69,11 +69,26 @@ an<Candidate> Context::GetSelectedCandidate() const {
   return composition_.back().GetSelectedCandidate();
 }
 
+// 蓬萊：touches_ 跟 input_ 一樣長（別的地方直接改了輸入時補空字串、截掉多的）
+void Context::SyncTouches() {
+  touches_.resize(input_.size());
+}
+
+// 蓬萊：前端這一鍵傳來的觸控，用一次就清掉
+string Context::TakeTouch() {
+  string touch;
+  touch.swap(pending_touch_);
+  return touch;
+}
+
 bool Context::PushInput(char ch) {
+  SyncTouches();
   if (caret_pos_ >= input_.length()) {
     input_.push_back(ch);
     caret_pos_ = input_.length();
+    touches_.push_back(TakeTouch());
   } else {
+    touches_.insert(touches_.begin() + caret_pos_, TakeTouch());
     input_.insert(caret_pos_, 1, ch);
     ++caret_pos_;
   }
@@ -82,6 +97,17 @@ bool Context::PushInput(char ch) {
 }
 
 bool Context::PushInput(const string& str) {
+  SyncTouches();
+  {
+    // 一次進好幾個鍵（模擬按鍵序列以外的路）：只有一個鍵時才記觸控
+    vector<string> added(str.size());
+    if (str.size() == 1)
+      added[0] = TakeTouch();
+    else
+      pending_touch_.clear();
+    size_t at = (std::min)(caret_pos_, touches_.size());
+    touches_.insert(touches_.begin() + at, added.begin(), added.end());
+  }
   if (caret_pos_ >= input_.length()) {
     input_ += str;
     caret_pos_ = input_.length();
@@ -97,6 +123,9 @@ bool Context::PopInput(size_t len) {
   if (caret_pos_ < len)
     return false;
   caret_pos_ -= len;
+  SyncTouches();
+  touches_.erase(touches_.begin() + caret_pos_,
+                 touches_.begin() + (std::min)(caret_pos_ + len, touches_.size()));
   input_.erase(caret_pos_, len);
   update_notifier_(this);
   return true;
@@ -105,6 +134,9 @@ bool Context::PopInput(size_t len) {
 bool Context::DeleteInput(size_t len) {
   if (caret_pos_ + len > input_.length())
     return false;
+  SyncTouches();
+  touches_.erase(touches_.begin() + caret_pos_,
+                 touches_.begin() + caret_pos_ + len);
   input_.erase(caret_pos_, len);
   update_notifier_(this);
   return true;
@@ -112,6 +144,7 @@ bool Context::DeleteInput(size_t len) {
 
 void Context::Clear() {
   input_.clear();
+  touches_.clear();
   caret_pos_ = 0;
   composition_.clear();
   update_notifier_(this);
@@ -285,6 +318,14 @@ void Context::set_composition(Composition&& comp) {
 }
 
 void Context::set_input(const string& value) {
+  // 蓬萊：觸控照舊對得上的部分留著（接在後面、截掉後面），其他整串換掉
+  SyncTouches();
+  if (value.compare(0, input_.size(), input_) == 0 ||
+      input_.compare(0, value.size(), value) == 0) {
+    touches_.resize(value.size());
+  } else {
+    touches_.assign(value.size(), string());
+  }
   input_ = value;
   caret_pos_ = input_.length();
   update_notifier_(this);
@@ -305,6 +346,11 @@ bool Context::get_option(const string& name) const {
 }
 
 void Context::set_property(const string& name, const string& value) {
+  // 蓬萊：前端傳來的觸控不當屬性存，等下一個進輸入的鍵拿走（前端每一鍵都會先設，沒觸控的設空字串）
+  if (name == "penglai_touch") {
+    pending_touch_ = value;
+    return;
+  }
   properties_[name] = value;
   property_update_notifier_(this, name);
 }

@@ -95,6 +95,9 @@ class Corrector : public Class<Corrector, const Ticket&> {
   // 蓬萊：照打的那段本身就是完整音節時，容錯再加的 log 分數（照打合法時多半就是要它）
   virtual double ValidPenalty() const { return 0.0; }
   virtual bool ValidSuggest() const { return false; }
+  // 蓬萊：照打合法時，這組錯（ops）的扣分、是不是只當建議。觸控給了按下去的位置時另外算（PenglaiKeyCorrector）
+  virtual double ValidPenaltyFor(unsigned ops) const { return ValidPenalty(); }
+  virtual bool ValidSuggestFor(unsigned ops) const { return ValidSuggest(); }
   virtual bool ClosedType() const { return false; }
   virtual bool ValidFirst() const { return false; }
   // 蓬萊：只修打了聲調的音節（例外是沒打聲調的模糊音，見 PenglaiKeyCorrector::Options::fuzzy_untoned）
@@ -107,6 +110,20 @@ class Corrector : public Class<Corrector, const Ticket&> {
 // 方案的 translator/key_model 打開時用這個，取代 NearSearchCorrector。實體鍵盤沒有碰觸座標，
 // 按錯鍵的機率照美式鍵盤上兩鍵中心的距離（二維常態分布）分給附近的鍵；另外加上 Google 沒做的
 // 多按一鍵（同一鍵連按兩下另計）、漏打聲母、漏打介音、模糊音。錯幾次就加幾次 log 機率
+// 蓬萊：觸控。ScriptSyllabifier 建音節圖之前設好這一段輸入每個鍵的觸控（Context::touches，offset 是這段輸入在
+// 整串輸入的起點），PenglaiKeyCorrector::ScoredSearch 讀；離開時還原。同一條執行緒同時只會建一張圖
+class RIME_DLL TouchScope {
+ public:
+  TouchScope(const vector<string>* touches, size_t offset);
+  ~TouchScope();
+  // 整串輸入第 offset + pos 個鍵的觸控；沒有就是 nullptr
+  static const string* At(size_t pos);
+
+ private:
+  const vector<string>* saved_touches_;
+  size_t saved_offset_;
+};
+
 class RIME_DLL PenglaiKeyCorrector : public Corrector {
  public:
   struct Options {
@@ -136,6 +153,18 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
     bool closed_type = false;
     // 照打合法時的建議詞（整段一個詞）分數贏過最好的整句時可以排第一；預設不行，最多排第二
     bool valid_first = false;
+    // 觸控（手機前端傳了按下去的位置時取代上面的鍵距）：本來要按 k、按到 typed 的機率
+    // = touch_prior × exp(−(d²(k) − d²(typed)) / (2 touch_sigma²))，d 是按下去的位置到鍵中心的距離（鍵寬為 1）
+    double touch_sigma = 0.35;
+    double touch_prior = 1.0;
+    // 照打本身是完整音節、但按下去的位置離別的鍵也近時：容錯的機率再乘這個（取代 valid），而且進整句、不只當建議。
+    // 按下去的位置就是證據（實體鍵盤沒有，所以照打合法時只當建議）
+    double touch_valid = 1.0;
+    // 按下去的位置要多靠近另一鍵才算上一條的證據：d²(k) − d²(typed) 不超過這個（鍵寬為 1；兩鍵中心連線上
+    // 離打出來的鍵中心 x 時是 1 − 2x，0.95 是偏了 0.025 鍵寬）。按在鍵中間的照實體鍵盤的規則（valid、只當建議）
+    double touch_near = 0.95;
+    // 一個音節最多錯幾次，算上觸控靠近另一鍵的換鍵（那種換鍵不佔 max_edits）
+    int touch_max_edits = 2;
   };
   enum : unsigned {
     kOpSubstitution = 1,
@@ -143,6 +172,7 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
     kOpExtra = 4,
     kOpDouble = 8,
     kOpOmission = 16,
+    kOpTouch = 32,  // 按到旁邊的鍵，照觸控按下去的位置算的（跟 kOpSubstitution 一起）
   };
   explicit PenglaiKeyCorrector(const Options& options);
   void ToleranceSearch(const Prism& prism,
@@ -164,6 +194,18 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
       return -std::numeric_limits<double>::infinity();  // 照打合法時不修
     return options_.valid < 1 ? std::log(options_.valid) : 0.0;
   }
+  double ValidPenaltyFor(unsigned ops) const override {
+    if (ops & kOpTouch)
+      return options_.touch_valid > 0 && options_.touch_valid < 1
+                 ? std::log(options_.touch_valid)
+                 : (options_.touch_valid <= 0
+                        ? -std::numeric_limits<double>::infinity()
+                        : 0.0);
+    return ValidPenalty();
+  }
+  bool ValidSuggestFor(unsigned ops) const override {
+    return (ops & kOpTouch) ? false : options_.valid_suggest;
+  }
   bool CorrectsAbbreviations() const override {
     return options_.abbreviations != "none";
   }
@@ -181,6 +223,13 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
 
  private:
   bool Untoned(unsigned ops, bool has_final) const;
+  // 這一鍵有觸控時，照按下去的位置算換成附近各鍵的機率；沒有觸控（或格式不對）回 false，用鍵距表
+  struct TouchAlt {
+    char key;
+    double cost;
+    bool near;  // 按下去的位置靠近這一鍵（kOpTouch）
+  };
+  bool TouchSubstitutes(size_t pos, char typed, vector<TouchAlt>* out) const;
   Options options_;
   // 打出 typed 鍵、本來要按的是 intended 鍵：每個 typed 鍵的候選（intended, log 機率）
   hash_map<char, vector<pair<char, double>>> substitutes_;

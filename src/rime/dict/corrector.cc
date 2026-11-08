@@ -532,21 +532,24 @@ void PenglaiKeyCorrector::ScoredSearch(const Prism& prism,
   // 結尾：ㄨ ㄗ ㄚ 是「我在啊」，ㄗㄚ 不是一個音節）就不修。打完整注音時「一」「啊」這種一個鍵的字也會被當成
   // 首注音、不修，只是少修，不會修錯。單獨的聲母（ㄈㄡ ㄓ 的 ㄓ）原本也擋（0054），11/6 晚上拿掉：
   // 修過的詞不再打亂照打的排序之後（0057、0060），只打首注音全量、混合題第一名開關相同
-  bool untoned_ok = true;
-  for (size_t i = 0; i < input.size() && untoned_ok; ++i) {
-    char c = input[i];
-    char next = i + 1 < input.size() ? input[i + 1] : 0;
-    bool next_starts = !next || IsIn(kInitialKeys, next);
-    if (IsIn(kInitialKeys, c))
-      continue;
-    if (IsIn(" 6347", c) || !next_starts)
-      continue;
-    char prev = i > 0 ? input[i - 1] : 0;
-    bool prev_ends = !prev || IsIn(" 6347", prev) ||
-                     (!IsIn(kInitialKeys, prev) && !IsIn(kMedialKeys, prev));
-    if (prev_ends)
-      untoned_ok = false;
-  }
+  auto lone_final_free = [](const string& in) {
+    for (size_t i = 0; i < in.size(); ++i) {
+      char c = in[i];
+      char next = i + 1 < in.size() ? in[i + 1] : 0;
+      bool next_starts = !next || IsIn(kInitialKeys, next);
+      if (IsIn(kInitialKeys, c))
+        continue;
+      if (IsIn(" 6347", c) || !next_starts)
+        continue;
+      char prev = i > 0 ? in[i - 1] : 0;
+      bool prev_ends = !prev || IsIn(" 6347", prev) ||
+                       (!IsIn(kInitialKeys, prev) && !IsIn(kMedialKeys, prev));
+      if (prev_ends)
+        return false;
+    }
+    return true;
+  };
+  const bool untoned_ok = lone_final_free(input);
   struct State {
     size_t node;
     size_t pos;  // 下一個要讀的輸入位置（整串輸入的索引）
@@ -560,6 +563,7 @@ void PenglaiKeyCorrector::ScoredSearch(const Prism& prism,
     bool has_final;  // 拼法裡有聲母以外的注音（介音、韻母）
     bool initial;    // 拼法的第一個鍵是聲母
     int touch_edits = 0;  // 觸控靠近另一鍵的換鍵次數（不算在 edits 裡）
+    char keys[8] = {};    // 拼法走過的鍵（前 8 個）：只照觸控換鍵的路，拿來把輸入換成修過的樣子
   };
   vector<State> stack;
   stack.push_back({0, begin, 0.0, 0, 0, -1, false, 0, false, false, false});
@@ -582,6 +586,9 @@ void PenglaiKeyCorrector::ScoredSearch(const Prism& prism,
             from.has_final || (!IsIn(kInitialKeys, c) && !IsIn(" 6347", c)),
             from.depth == 0 ? IsIn(kInitialKeys, c) : from.initial};
     s.touch_edits = from.touch_edits + ((op & kOpTouch) ? 1 : 0);
+    std::memcpy(s.keys, from.keys, sizeof(s.keys));
+    if (from.depth < 8)
+      s.keys[from.depth] = c;
     if (s.edits > max_edits || s.edits + s.touch_edits > total_max ||
         s.score < kFloor)
       return;
@@ -589,8 +596,21 @@ void PenglaiKeyCorrector::ScoredSearch(const Prism& prism,
     const bool touch_abbrev = s.depth == 1 && TouchAbbreviation(s.ops) &&
                               IsIn(kInitialKeys, c) &&
                               IsIn(kInitialKeys, input[from.pos]);
+    // 觸控沒打聲調的完整音節（0071，11/8 手機 tk0：想打 ㄔㄨㄢ，ㄨ 按偏到 ㄜ）：只照觸控換鍵、有聲母也有
+    // 介音或韻母時照收（require_tone 原本只收模糊音）。上面「單獨一個韻母就不修」照修過的輸入重看：
+    // ㄔㄜ ㄢ 的 ㄢ 像單獨的「安」，是按偏造出來的，ㄜ 換回 ㄨ 之後就不是
+    bool touch_untoned = false;
+    if (val >= 0 && !s.closed && !touch_abbrev && s.has_final && s.initial &&
+        TouchAbbreviation(s.ops) && s.depth <= 8 &&
+        s.pos - begin == static_cast<size_t>(s.depth) &&
+        !(untoned_ok && Untoned(s.ops, true))) {
+      string fixed = input;
+      for (int i = 0; i < s.depth; ++i)
+        fixed[begin + i] = s.keys[i];
+      touch_untoned = lone_final_free(fixed);
+    }
     if (val >= 0 && s.edits + s.touch_edits > 0 &&
-        (s.closed || touch_abbrev ||
+        (s.closed || touch_abbrev || touch_untoned ||
          (untoned_ok && Untoned(s.ops, s.has_final && s.initial)))) {
       Correction c{static_cast<size_t>(s.edits + s.touch_edits), static_cast<SyllableId>(val),
                    s.pos - begin, s.score, true};

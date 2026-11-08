@@ -179,7 +179,8 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
     // 照 touch_near 就會被讀成「可以」（ㄎ ㄧˇ），最後的「的」不見（11/7 Jason「用起來怪怪的」調查）
     double touch_close = 0.4;
     // 觸控的簡拼：只打第一個注音的聲母（一個鍵）也照按下去的位置換成附近的聲母（Gboard 的單獨聲母也有觸控的
-    // 鄰鍵）。只收聲母換聲母、整個拼法就是那一鍵；照打的聲母本身是合法的簡拼，跟照打合法一樣扣 touch_valid
+    // 鄰鍵）。只收聲母換聲母、整個拼法就是那一鍵；照打的聲母本身是合法的簡拼，跟照打合法一樣扣 touch_valid。
+    // 0071 起也管沒打聲調的完整音節（有聲母、有介音或韻母，只照觸控換鍵）：require_tone 開著時原本不修
     bool touch_abbreviations = true;
     // 一個音節最多錯幾次，算上觸控靠近另一鍵的換鍵（那種換鍵不佔 max_edits）
     int touch_max_edits = 2;

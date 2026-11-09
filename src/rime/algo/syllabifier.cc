@@ -167,6 +167,8 @@ int Syllabifier::BuildSyllableGraph(const string& input,
     const bool scored = corrector_ && corrector_->Scored();
     // 蓬萊：照打就有完整音節的長度（按鍵模型：這種長度的容錯另外扣 ValidPenalty）
     set<size_t> exact_normal_lengths;
+    // 蓬萊（0073）：照打切得成兩個以上音節的長度（下面算）
+    set<size_t> split_normal_lengths;
     if (corrector_) {
       for (auto& m : matches) {
         exact_match_syllables.insert({m.value, m.length});
@@ -196,6 +198,55 @@ int Syllabifier::BuildSyllableGraph(const string& input,
         corrector_->ScoredSearch(prism, input, begin_pos, &corrections);
       else
         corrector_->ToleranceSearch(prism, current_input, &corrections, 5);
+      // 蓬萊（0073）：照打切得成兩個以上音節的長度，也算照打合法（扣 ValidPenalty，不當建議）。
+      // m/n␣ 刪掉多按的 n 修成 ㄩㄥˉ（傭人）時，照打其實是 ㄩㄥ|ㄙˉ（用私人），原本只看等長的照打是不是一個音節，
+      // 沒扣到，修過的詞排第一。切點要像照打的音節邊界（跟 0072 補 ← 切點同一條）：前一段以聲調鍵結尾，
+      // 或前一段不是單獨一個聲母、下一段從聲母開始。連按兩下 ㄒㄒㄧㄝ˙ 照打切成 ㄒ|ㄒㄧㄝ˙，前一段是單獨的聲母，不算
+      if (scored) {
+        size_t max_len = 0;
+        for (const auto& m : corrections)
+          if (!exact_normal_lengths.count(m.second.length))
+            max_len = (std::max)(max_len, m.second.length);
+        if (max_len > 1) {
+          string head = current_input.substr(0, max_len);
+          // 每個位置照打的拼法長度
+          vector<vector<size_t>> piece(max_len);
+          for (size_t k = 0; k < max_len; ++k) {
+            vector<Prism::Match> sub;
+            prism.CommonPrefixSearch(head.substr(k), &sub);
+            for (const auto& x : sub)
+              if (x.length > 0)
+                piece[k].push_back(x.length);
+          }
+          auto boundary_ok = [&](size_t a, size_t p) {
+            if (PenglaiKeyCorrector::IsToneKey(head[p - 1]))
+              return true;
+            bool lone_initial =
+                p - a == 1 && PenglaiKeyCorrector::IsInitialKey(head[a]);
+            return !lone_initial && PenglaiKeyCorrector::IsInitialKey(head[p]);
+          };
+          // (位置, 前一段的起點)，從第一段的結尾開始
+          vector<pair<size_t, size_t>> stack;
+          set<pair<size_t, size_t>> seen;
+          for (size_t len : piece[0])
+            if (len < max_len)
+              stack.push_back({len, 0});
+          while (!stack.empty()) {
+            auto [pos, a] = stack.back();
+            stack.pop_back();
+            if (!seen.insert({pos, a}).second || !boundary_ok(a, pos))
+              continue;
+            for (size_t len : piece[pos]) {
+              size_t end = pos + len;
+              if (end > max_len)
+                continue;
+              split_normal_lengths.insert(end);
+              if (end < max_len)
+                stack.push_back({end, pos});
+            }
+          }
+        }
+      }
       for (const auto& m : corrections) {
         const auto& c = m.second;
         if (exact_match_syllables.count({c.syllable, c.length}))
@@ -207,7 +258,9 @@ int Syllabifier::BuildSyllableGraph(const string& input,
             !corrector_->IsTouchAbbreviation(c.ops))
           continue;
         // 蓬萊：照打的那段就是完整音節、設定成照打合法時不修
-        if (scored && exact_normal_lengths.count(c.length) &&
+        if (scored &&
+            (exact_normal_lengths.count(c.length) ||
+             split_normal_lengths.count(c.length)) &&
             !std::isfinite(corrector_->ValidPenaltyFor(c.ops)))
           continue;
         for (auto accessor = prism.QuerySpelling(c.syllable);
@@ -283,6 +336,10 @@ int Syllabifier::BuildSyllableGraph(const string& input,
                 if (!exact_normal_lengths.count(m.length) &&
                     corrector_->IsTouchAbbreviation(sc->second.ops)) {
                   // 觸控的簡拼：照打的聲母本身也是合法的簡拼，跟照打合法一樣扣分（touch_valid）
+                  props.credibility += corrector_->ValidPenaltyFor(sc->second.ops);
+                }
+                if (!exact_normal_lengths.count(m.length) &&
+                    split_normal_lengths.count(m.length)) {
                   props.credibility += corrector_->ValidPenaltyFor(sc->second.ops);
                 }
                 if (exact_normal_lengths.count(m.length)) {

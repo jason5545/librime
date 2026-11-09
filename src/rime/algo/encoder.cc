@@ -4,6 +4,8 @@
 //
 // 2013-07-17 GONG Chen <chen.sst@gmail.com>
 //
+#include <set>
+#include <sstream>
 #include <boost/algorithm/string.hpp>
 #include <utf8.h>
 #include <rime/config.h>
@@ -14,6 +16,73 @@ namespace rime {
 
 static const int kEncoderDfsLimit = 32;
 static const int kMaxPhraseLength = 32;
+
+// 蓬萊 0074：自動編碼順便補「一」「不」的變調讀音（rime-penglai tools/gen_terra_tw.py 檔頭規則 4 同一條）。
+// 「一」接一、二、三聲補 ㄧˋ，接四聲補 ㄧˊ；「不」接四聲補 ㄅㄨˊ；接輕聲不補。「一」的前一個字是數字、第、初、
+// 統、唯這類，或後一個字是數字時不補（序數、數字、「統一」）。本調讀音照舊編，變調另外一筆，比重是原本的
+// kSandhiRatio（essay 詞頻、詞典那一行的比重都一樣乘）。碼不是注音（拼音方案）時對不上「ㄧ」「ㄅㄨˋ」，不會動。
+// 單字「一」的 ㄧˋ、ㄧˊ 只有 1%，自動編碼只用比重 ≥ 總和 5% 的讀音，沒有這條時沒寫讀音的詞（essay 的一隻、
+// 一些，擴充詞典裡的「看一下」）只編得出本調 ㄧ，打變調叫不出詞（Jason 11/9）。
+static const double kSandhiRatio = 0.2;
+
+static bool PenglaiToneSandhi(const string& phrase,
+                              const RawCode& code,
+                              string* result) {
+  vector<string> chars;
+  for (const char* p = phrase.c_str(); *p;) {
+    const char* start = p;
+    utf8::unchecked::next(p);
+    chars.emplace_back(start, p);
+  }
+  if (chars.size() < 2 || chars.size() != code.size())
+    return false;
+  static const std::set<string> kNumerals = {
+      "〇", "零", "一", "二", "三", "四", "五", "六", "七", "八",
+      "九", "十", "百", "千", "萬", "億", "兩", "廿", "卅"};
+  static const std::set<string> kYiKeepAfter = {
+      "第", "初", "統", "唯", "專", "單", "逐", "獨", "惟"};
+  RawCode variant(code);
+  bool changed = false;
+  for (size_t i = 0; i + 1 < chars.size(); ++i) {
+    const string& next = code[i + 1];
+    if (boost::ends_with(next, "˙"))
+      continue;
+    const bool fourth = boost::ends_with(next, "ˋ");
+    if (chars[i] == "一" && code[i] == "ㄧ") {
+      if (kNumerals.count(chars[i + 1]) ||
+          (i > 0 && (kNumerals.count(chars[i - 1]) ||
+                     kYiKeepAfter.count(chars[i - 1]))))
+        continue;
+      variant[i] = fourth ? "ㄧˊ" : "ㄧˋ";
+      changed = true;
+    } else if (chars[i] == "不" && code[i] == "ㄅㄨˋ" && fourth) {
+      variant[i] = "ㄅㄨˊ";
+      changed = true;
+    }
+  }
+  if (!changed)
+    return false;
+  *result = variant.ToString();
+  return true;
+}
+
+// 變調那一筆的比重：空著（照 essay 詞頻）→ kSandhiRatio 的百分比；百分比、絕對值都乘 kSandhiRatio
+static string PenglaiSandhiWeight(const string& value) {
+  std::ostringstream out;
+  try {
+    if (value.empty()) {
+      out << kSandhiRatio * 100 << "%";
+    } else if (boost::ends_with(value, "%")) {
+      out << std::stod(value.substr(0, value.length() - 1)) * kSandhiRatio
+          << "%";
+    } else {
+      out << std::stod(value) * kSandhiRatio;
+    }
+  } catch (...) {
+    return value;
+  }
+  return out.str();
+}
 
 string RawCode::ToString() const {
   return strings::join(*this, " ");
@@ -312,6 +381,9 @@ bool ScriptEncoder::DfsEncode(const string& phrase,
       --*limit;
     }
     collector_->CreateEntry(phrase, code->ToString(), value);
+    string sandhi;
+    if (PenglaiToneSandhi(phrase, *code, &sandhi))
+      collector_->CreateEntry(phrase, sandhi, PenglaiSandhiWeight(value));
     return true;
   }
   bool ret = false;

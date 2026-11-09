@@ -196,6 +196,9 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
     kOpTouchSub = 128,  // 換鍵照觸控算的（不管靠不靠近；跟 kOpSubstitution 一起）
   };
   explicit PenglaiKeyCorrector(const Options& options);
+  // 大千鍵位的聲母鍵、聲調鍵（0072：← 在修正邊裡補照打的音節切點時用）
+  static bool IsInitialKey(char c);
+  static bool IsToneKey(char c);
   void ToleranceSearch(const Prism& prism,
                        const string& key,
                        corrector::Corrections* results,

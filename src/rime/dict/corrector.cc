@@ -451,6 +451,14 @@ bool PenglaiKeyCorrector::TouchSubstitutes(size_t pos,
   return true;
 }
 
+bool PenglaiKeyCorrector::IsInitialKey(char c) {
+  return IsIn(kInitialKeys, c);
+}
+
+bool PenglaiKeyCorrector::IsToneKey(char c) {
+  return IsIn(" 6347", c);
+}
+
 PenglaiKeyCorrector::PenglaiKeyCorrector(const Options& options)
     : options_(options) {
   auto safe_log = [](double p) {

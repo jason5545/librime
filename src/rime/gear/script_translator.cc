@@ -1564,15 +1564,96 @@ bool ScriptTranslator::EnglishCode(const string& word, Code* code) {
 
 // ScriptSyllabifier implementation
 
+// 蓬萊（0072）：修正邊（按鍵模型、容錯）可能一次蓋住好幾個照打的音節（m/n␣ 刪掉 n 修成 ㄩㄥˉ），
+// 切點只放邊的兩端的話，← 會跳過中間照打的音節（6 → 4 → 0）。從 from 到 to 只走不是修正的邊，
+// 找音節最少的一條，中間的切點只留像是照打的音節邊界的：前一段以聲調鍵結尾（ㄕˋ|ㄨˋ），或前一段不是
+// 單獨一個聲母、下一段從聲母開始（ㄩㄥ|ㄙˉ）。打錯的只是一個音節時（ㄒㄧㄝ˙ 打成 ㄒㄧㄡ˙、ㄒㄒㄧㄝˋ 連按兩下）
+// 照打雖然也切得成 ㄒ|ㄧㄡ˙、ㄒ|ㄒㄧㄝˋ，前一段是單獨的聲母或下一段不從聲母開始，不補
+static vector<size_t> TypedStops(const SyllableGraph& graph,
+                                 const string& input,
+                                 size_t from,
+                                 size_t to) {
+  map<size_t, size_t> prev;  // 終點 → 前一個切點
+  vector<size_t> frontier{from};
+  while (!frontier.empty() && !prev.count(to)) {
+    vector<size_t> next_frontier;
+    for (size_t pos : frontier) {
+      auto start_iter = graph.edges.find(pos);
+      if (start_iter == graph.edges.end())
+        continue;
+      for (const auto& end_entry : start_iter->second) {
+        size_t end = end_entry.first;
+        if (end <= pos || end > to || end == from || prev.count(end))
+          continue;
+        bool normal = false;
+        for (const auto& spelling : end_entry.second) {
+          if (!spelling.second.is_correction) {
+            normal = true;
+            break;
+          }
+        }
+        if (!normal)
+          continue;
+        prev[end] = pos;
+        next_frontier.push_back(end);
+      }
+    }
+    frontier = std::move(next_frontier);
+  }
+  vector<size_t> path;
+  if (!prev.count(to))
+    return path;
+  for (size_t pos = to; pos != from; pos = prev[pos])
+    path.push_back(pos);
+  path.push_back(from);
+  std::reverse(path.begin(), path.end());
+  vector<size_t> stops;
+  for (size_t i = 1; i + 1 < path.size(); ++i) {
+    size_t a = path[i - 1], p = path[i];
+    if (p == 0 || p >= input.length())
+      continue;
+    bool toned = PenglaiKeyCorrector::IsToneKey(input[p - 1]);
+    bool lone_initial =
+        p - a == 1 && PenglaiKeyCorrector::IsInitialKey(input[a]);
+    if (toned ||
+        (!lone_initial && PenglaiKeyCorrector::IsInitialKey(input[p])))
+      stops.push_back(p);
+  }
+  return stops;
+}
+
 Spans ScriptSyllabifier::Syllabify(const Phrase* phrase) {
   Spans result;
   vector<size_t> vertices;
   vertices.push_back(start_);
+  vector<size_t> pushed;  // 每一層放了幾個切點（修正邊會多放中間的）
   SyllabifyTask task{
       phrase->code(), syllable_graph_, phrase->end() - start_,
       [&](SyllabifyTask* task, size_t depth, size_t current_pos,
-          size_t next_pos) { vertices.push_back(start_ + next_pos); },
-      [&](SyllabifyTask* task, size_t depth) { vertices.pop_back(); }};
+          size_t next_pos) {
+        size_t count = 1;
+        auto start_iter = syllable_graph_.edges.find(current_pos);
+        if (start_iter != syllable_graph_.edges.end()) {
+          auto end_iter = start_iter->second.find(next_pos);
+          if (end_iter != start_iter->second.end()) {
+            auto prop_iter = end_iter->second.find(task->code[depth]);
+            if (prop_iter != end_iter->second.end() &&
+                prop_iter->second.is_correction) {
+              for (size_t stop :
+                   TypedStops(syllable_graph_, input_, current_pos, next_pos)) {
+                vertices.push_back(start_ + stop);
+                ++count;
+              }
+            }
+          }
+        }
+        vertices.push_back(start_ + next_pos);
+        pushed.push_back(count);
+      },
+      [&](SyllabifyTask* task, size_t depth) {
+        vertices.resize(vertices.size() - pushed.back());
+        pushed.pop_back();
+      }};
   if (syllabify_dfs(&task, 0, phrase->start() - start_)) {
     result.set_vertices(std::move(vertices));
   }

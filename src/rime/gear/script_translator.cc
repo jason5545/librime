@@ -3319,9 +3319,15 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
   //      怎麼重組不算進判斷（顯示的還是 Poet 重組的那句）；切點對不上詞的邊界時用重組的那句比。
   //    - 第一候選裡有學過 english_judge_learned 字以上的詞就不換。
   //    - 單字表外的字母串、數字（退回按鍵原本的字）：整段剛好是一個詞（不是組出來的句子）時不當候選，
-  //      輪到下一個英文候選判斷。
+  //      輪到下一個英文候選判斷。數字只看夠常用的詞（whole_common_word），冷僻詞照常判斷。
   bool promote = false;
   bool whole_word = false;
+  // 蓋住整段的那個詞學過（commit_count > 0）或夠常用（比重 ≥ kDigitWordMinWeight）才擋數字：
+  // 冷僻詞、學習紀錄裡 0 次的詞不算「按鍵剛好拼出一個詞」的證據。
+  // 09（ㄢㄞ）只拼得出 essay 才有的「暗藹」（171 次）、萌典的「菴藹」（169 次），Jason 要的是 09（11/10）。
+  // −14 約是 essay 335 次；空學習紀錄兩鍵數字整段是一個詞的 26 組裡只有 09 低於它（次低是 85 阿朱 −13.3）
+  bool whole_common_word = false;
+  constexpr double kDigitWordMinWeight = -14.0;
   vector<Reading> readings;
   if (judge) {
     CheckEmpty();  // 建構時是 exhausted，Evaluate 最後才更新；這時 english_ 還是空的
@@ -3365,6 +3371,9 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
         if (first->entry().commit_count > 0)
           learned = static_cast<int>(utf8_length(first->text()));
         whole_word = first->end() == start_ + n;
+        whole_common_word =
+            whole_word && (first->entry().commit_count > 0 ||
+                           first->entry().weight >= kDigitWordMinWeight);
       }
     }
     const size_t k_readings = static_cast<size_t>(
@@ -3456,7 +3465,8 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
       fallback = fallback || !s.in_lexicon;
       late = late || !s.in_lexicon || s.short_word;
     }
-    if (fallback && whole_word)
+    if (fallback && whole_word &&
+        (!m.config->front().digits || whole_common_word))
       continue;
     if (seen.insert(m.cand->text()).second) {
       // 排第一：排在最前面的那個英文候選，比最通順的中文讀法高

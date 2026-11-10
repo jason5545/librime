@@ -255,7 +255,7 @@ int Syllabifier::BuildSyllableGraph(const string& input,
         // （ㄕ ㄛ 是「是哦」，不是 ㄕㄡ）
         if (scored && !c.closed && corrector_->RequiresTone() &&
             !exact_normal_lengths.count(c.length) &&
-            !corrector_->IsTouchAbbreviation(c.ops))
+            !corrector_->IsAbbreviationSwap(c.ops))
           continue;
         // 蓬萊：照打的那段就是完整音節、設定成照打合法時不修
         if (scored &&
@@ -334,8 +334,8 @@ int Syllabifier::BuildSyllableGraph(const string& input,
                 props.is_correction = true;
                 props.credibility += sc->second.score;
                 if (!exact_normal_lengths.count(m.length) &&
-                    corrector_->IsTouchAbbreviation(sc->second.ops)) {
-                  // 觸控的簡拼：照打的聲母本身也是合法的簡拼，跟照打合法一樣扣分（touch_valid）
+                    corrector_->IsAbbreviationSwap(sc->second.ops)) {
+                  // 簡拼換鍵：照打的聲母（觸控）、韻母（lone_finals）本身也是合法的簡拼，跟照打合法一樣扣分（touch_valid、valid）
                   props.credibility += corrector_->ValidPenaltyFor(sc->second.ops);
                 }
                 if (!exact_normal_lengths.count(m.length) &&

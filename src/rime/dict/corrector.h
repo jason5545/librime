@@ -104,8 +104,9 @@ class Corrector : public Class<Corrector, const Ticket&> {
   virtual bool RequiresTone() const { return false; }
   // 蓬萊：修過的詞要不要在註解寫上修成的讀音
   virtual bool ShowReading() const { return false; }
-  // 蓬萊：觸控的簡拼（一個鍵的聲母照觸控換成附近的聲母），沒打聲調也收
-  virtual bool IsTouchAbbreviation(unsigned ops) const { return false; }
+  // 蓬萊：簡拼換鍵，沒打聲調也收：觸控的簡拼（一個鍵的聲母照觸控換成附近的聲母）、
+  // 實體鍵盤單獨一個韻母換成旁邊的韻母（PenglaiKeyCorrector::Options::lone_finals）
+  virtual bool IsAbbreviationSwap(unsigned ops) const { return false; }
 };
 
 // 蓬萊：按鍵模型（照 Google 注音的做法：每一鍵都是機率，跟語言模型分數一起排）。
@@ -184,6 +185,10 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
     bool touch_abbreviations = true;
     // 一個音節最多錯幾次，算上觸控靠近另一鍵的換鍵（那種換鍵不佔 max_edits）
     int touch_max_edits = 2;
+    // 單獨一個韻母的首注音（後面接聲母或結尾，像「而」只打 ㄦ）照鍵距換成旁邊的韻母（ㄦ 按成 ㄢ），介音不換。
+    // 照打的韻母本身也是合法的簡拼，跟照打合法一樣扣 valid。只打完整注音的人（打法偵測）不修：他們會打聲調，
+    // 有聲調的照一般的換鄰鍵修。11/10 Jason 打 ㄦ ㄑㄧㄝˇ（而且）按成 ㄢ ㄑㄧㄝˇ，出「安全也」
+    bool lone_finals = false;
   };
   enum : unsigned {
     kOpSubstitution = 1,
@@ -194,6 +199,7 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
     kOpTouch = 32,  // 按到旁邊的鍵，照觸控按下去的位置算的（跟 kOpSubstitution 一起）
     kOpTouchClose = 64,  // 觸控換成聲調鍵、而且按得夠靠近（touch_close）：算打完音節（跟 kOpTouch 一起）
     kOpTouchSub = 128,  // 換鍵照觸控算的（不管靠不靠近；跟 kOpSubstitution 一起）
+    kOpLoneFinal = 256,  // 單獨一個韻母換成旁邊的韻母（lone_finals；跟 kOpSubstitution 一起）
   };
   explicit PenglaiKeyCorrector(const Options& options);
   // 大千鍵位的聲母鍵、聲調鍵（0072：← 在修正邊裡補照打的音節切點時用）
@@ -213,8 +219,8 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
   bool ValidFirst() const override { return options_.valid_first; }
   bool RequiresTone() const override { return options_.require_tone; }
   bool ShowReading() const override { return options_.show_reading; }
-  bool IsTouchAbbreviation(unsigned ops) const override {
-    return TouchAbbreviation(ops);
+  bool IsAbbreviationSwap(unsigned ops) const override {
+    return TouchAbbreviation(ops) || LoneFinal(ops);
   }
   double ValidPenalty() const override {
     if (options_.valid <= 0)
@@ -241,7 +247,7 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
     if (!closed && ops == kOpFuzzy && options_.fuzzy_untoned &&
         options_.require_tone)
       return true;
-    if (TouchAbbreviation(ops))
+    if (TouchAbbreviation(ops) || LoneFinal(ops))
       return true;
     if (options_.abbreviations == "all")
       return !(ops & kOpOmission);
@@ -256,6 +262,10 @@ class RIME_DLL PenglaiKeyCorrector : public Corrector {
     return options_.touch_abbreviations && !TouchScope::FullStyle() &&
            (ops & kOpTouchSub) &&
            !(ops & ~(kOpSubstitution | kOpTouch | kOpTouchClose | kOpTouchSub));
+  }
+  // 單獨一個韻母換成旁邊的韻母（lone_finals）：只有這一次換鍵
+  bool LoneFinal(unsigned ops) const {
+    return options_.lone_finals && ops == (kOpSubstitution | kOpLoneFinal);
   }
   bool Untoned(unsigned ops, bool has_final) const;
   // 這一鍵有觸控時，照按下去的位置算換成附近各鍵的機率；沒有觸控（或格式不對）回 false，用鍵距表

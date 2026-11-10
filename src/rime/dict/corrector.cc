@@ -558,6 +558,22 @@ void PenglaiKeyCorrector::ScoredSearch(const Prism& prism,
     return true;
   };
   const bool untoned_ok = lone_final_free(input);
+  // 單獨一個韻母（lone_finals）：這一段第一個鍵是韻母，後面接聲母或結尾（ㄢ ㄑ 的 ㄢ；ㄢㄧ 的 ㄢ 不算）。
+  // 前一鍵是什麼都可以：只打首注音時前一鍵幾乎都是聲母（ㄨ ㄇ ㄦ ㄑ 是「我們而且」），只收前面斷開的
+  // 新詞句效益題只救得到兩成（前一鍵是聲母的 283 題第一名 2 → 2；收了是 2 → 114，首注音全量照樣 0 題改壞）。
+  // 介音（ㄧㄨㄩ）不算：單獨的介音是一大堆字的首注音（一、有、我、為、與），換了只是多出雜訊
+  // （空學習紀錄的新詞句首二注音 ㄨ↔ㄧ 名次往後 17 題，「我不算」第二變「也不算」）
+  auto is_final_key = [](char c) {
+    return c && !IsIn(kInitialKeys, c) && !IsIn(" 6347", c) && !IsIn(kMedialKeys, c);
+  };
+  const bool lone_final_here = [&] {
+    if (!options_.lone_finals || TouchScope::FullStyle() || begin >= input.size())
+      return false;
+    if (!is_final_key(input[begin]))
+      return false;
+    char next = begin + 1 < input.size() ? input[begin + 1] : 0;
+    return !next || IsIn(kInitialKeys, next);
+  }();
   struct State {
     size_t node;
     size_t pos;  // 下一個要讀的輸入位置（整串輸入的索引）
@@ -600,10 +616,12 @@ void PenglaiKeyCorrector::ScoredSearch(const Prism& prism,
     if (s.edits > max_edits || s.edits + s.touch_edits > total_max ||
         s.score < kFloor)
       return;
-    // 觸控的簡拼：一個鍵的聲母照觸控換成附近的聲母（打的那一鍵也是聲母）
-    const bool touch_abbrev = s.depth == 1 && TouchAbbreviation(s.ops) &&
-                              IsIn(kInitialKeys, c) &&
-                              IsIn(kInitialKeys, input[from.pos]);
+    // 觸控的簡拼：一個鍵的聲母照觸控換成附近的聲母（打的那一鍵也是聲母）；
+    // 實體鍵盤單獨一個韻母換成旁邊的韻母（lone_finals，換鍵那一步已經看過後面接聲母或結尾）
+    const bool touch_abbrev = s.depth == 1 &&
+                              ((TouchAbbreviation(s.ops) && IsIn(kInitialKeys, c) &&
+                                IsIn(kInitialKeys, input[from.pos])) ||
+                               LoneFinal(s.ops));
     // 觸控沒打聲調的完整音節（0071，11/8 手機 tk0：想打 ㄔㄨㄢ，ㄨ 按偏到 ㄜ）：只照觸控換鍵、有聲母也有
     // 介音或韻母時照收（require_tone 原本只收模糊音）。上面「單獨一個韻母就不修」照修過的輸入重看：
     // ㄔㄜ ㄢ 的 ㄢ 像單獨的「安」，是按偏造出來的，ㄜ 換回 ㄨ 之後就不是。
@@ -658,9 +676,13 @@ void PenglaiKeyCorrector::ScoredSearch(const Prism& prism,
         } else {
           auto sub = substitutes_.find(typed);
           if (sub != substitutes_.end())
-            for (const auto& alt : sub->second)
-              step(st, alt.first, st.pos + 1, alt.second, kOpSubstitution,
-                   &next);
+            for (const auto& alt : sub->second) {
+              // 單獨一個韻母換成旁邊的韻母（lone_finals）：標上 kOpLoneFinal，沒打聲調也收
+              const bool lone = lone_final_here && st.depth == 0 &&
+                                st.pos == begin && is_final_key(alt.first);
+              step(st, alt.first, st.pos + 1, alt.second,
+                   kOpSubstitution | (lone ? kOpLoneFinal : 0), &next);
+            }
         }
         // 模糊音
         auto fz = fuzzy_.find(typed);
@@ -752,6 +774,7 @@ Corrector* CorrectorComponent::Create(const Ticket& ticket) noexcept {
       config->GetDouble(ticket.name_space + "/key_model/touch_close", &o.touch_close);
       config->GetBool(ticket.name_space + "/key_model/touch_abbreviations", &o.touch_abbreviations);
       config->GetInt(ticket.name_space + "/key_model/touch_max_edits", &o.touch_max_edits);
+      config->GetBool(ticket.name_space + "/key_model/lone_finals", &o.lone_finals);
       if (auto list = config->GetList(ticket.name_space + "/key_model/fuzzy_pairs")) {
         for (size_t i = 0; i < list->size(); ++i) {
           if (auto v = list->GetValueAt(i))

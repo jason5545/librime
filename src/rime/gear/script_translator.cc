@@ -1569,10 +1569,15 @@ bool ScriptTranslator::EnglishCode(const string& word, Code* code) {
 // 找音節最少的一條，中間的切點只留像是照打的音節邊界的：前一段以聲調鍵結尾（ㄕˋ|ㄨˋ），或前一段不是
 // 單獨一個聲母、下一段從聲母開始（ㄩㄥ|ㄙˉ）。打錯的只是一個音節時（ㄒㄧㄝ˙ 打成 ㄒㄧㄡ˙、ㄒㄒㄧㄝˋ 連按兩下）
 // 照打雖然也切得成 ㄒ|ㄧㄡ˙、ㄒ|ㄒㄧㄝˋ，前一段是單獨的聲母或下一段不從聲母開始，不補
+//
+// 0077：打法是 abbrev（常常只打第一個注音）時，單獨一個聲母本來就是一個照打的音節，前一段是單獨的聲母、
+// 下一段從聲母開始也補（be e.␣ 是 ㄖ ㄍ ㄍㄡˉ，按鍵模型把連按兩下的 ㄍ 刪掉修成「乳溝」，← 從 5 直接跳到 1、
+// ㄍ|ㄍㄡˉ 那個切點不見）。只打完整注音、還不知道打法的人照舊不補
 static vector<size_t> TypedStops(const SyllableGraph& graph,
                                  const string& input,
                                  size_t from,
-                                 size_t to) {
+                                 size_t to,
+                                 bool lone_initials) {
   map<size_t, size_t> prev;  // 終點 → 前一個切點
   vector<size_t> frontier{from};
   while (!frontier.empty() && !prev.count(to)) {
@@ -1615,8 +1620,8 @@ static vector<size_t> TypedStops(const SyllableGraph& graph,
     bool toned = PenglaiKeyCorrector::IsToneKey(input[p - 1]);
     bool lone_initial =
         p - a == 1 && PenglaiKeyCorrector::IsInitialKey(input[a]);
-    if (toned ||
-        (!lone_initial && PenglaiKeyCorrector::IsInitialKey(input[p])))
+    if (toned || ((lone_initials || !lone_initial) &&
+                  PenglaiKeyCorrector::IsInitialKey(input[p])))
       stops.push_back(p);
   }
   return stops;
@@ -1627,6 +1632,7 @@ Spans ScriptSyllabifier::Syllabify(const Phrase* phrase) {
   vector<size_t> vertices;
   vertices.push_back(start_);
   vector<size_t> pushed;  // 每一層放了幾個切點（修正邊會多放中間的）
+  const bool abbrev_style = translator_->typing_style() == "abbrev";
   SyllabifyTask task{
       phrase->code(), syllable_graph_, phrase->end() - start_,
       [&](SyllabifyTask* task, size_t depth, size_t current_pos,
@@ -1640,7 +1646,8 @@ Spans ScriptSyllabifier::Syllabify(const Phrase* phrase) {
             if (prop_iter != end_iter->second.end() &&
                 prop_iter->second.is_correction) {
               for (size_t stop :
-                   TypedStops(syllable_graph_, input_, current_pos, next_pos)) {
+                   TypedStops(syllable_graph_, input_, current_pos, next_pos,
+                              abbrev_style)) {
                 vertices.push_back(start_ + stop);
                 ++count;
               }

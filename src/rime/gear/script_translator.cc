@@ -2767,6 +2767,94 @@ std::optional<double> ScriptTranslation::ScoreSplit(
   return std::nullopt;
 }
 
+// 蓬萊 0078：pos 後面緊接「韻母（介音）＋聲調鍵」、中間沒有聲母時，回傳聲調鍵後面的位置（照打的那個音節的結尾）；
+// 不是這種情形回傳 0。pos 前一個鍵是聲調鍵（音節已經打完）、pos 就是聲調鍵（ㄋ|ˇ）都不算
+static size_t TonedSyllableEnd(const string& input, size_t pos) {
+  if (pos == 0 || pos >= input.length() ||
+      PenglaiKeyCorrector::IsToneKey(input[pos - 1]))
+    return 0;
+  size_t q = pos;
+  while (q < input.length() && !PenglaiKeyCorrector::IsInitialKey(input[q]) &&
+         !PenglaiKeyCorrector::IsToneKey(input[q]))
+    ++q;
+  if (q == pos || q >= input.length() ||
+      !PenglaiKeyCorrector::IsToneKey(input[q]))
+    return 0;
+  return q + 1;
+}
+
+// 蓬萊 0078：詞沒收「吃到 toned_end」的讀音時看最後一個字：從 p（from ≤ p < end，單字是 from）到 toned_end 照打是
+// 一個完整音節（不是修正邊），最後一個字的單字讀音收了它，而且跟 base（吃到 end 的詞條）最後一個音節第一個注音相同
+// （同一個字的另一個讀音，不是剛好接得上的別的音節），就回傳最後一個音節換成這個讀音的詞條；找不到回傳空的。
+// 不用「p 到 end 有簡拼邊」來定位：整段輸入的音節圖裡，單獨的聲母後面接得成完整音節時，簡拼那條邊不在
+static an<DictEntry> CharReadingEntry(Dictionary* dict,
+                                      const SyllableGraph& graph,
+                                      size_t from,
+                                      size_t end,
+                                      size_t toned_end,
+                                      const DictEntry& base) {
+  if (base.code.empty() || base.text.empty())
+    return nullptr;
+  size_t tail = base.text.length() - 1;
+  while (tail > 0 &&
+         (static_cast<unsigned char>(base.text[tail]) & 0xC0) == 0x80)
+    --tail;
+  const string last_char = base.text.substr(tail);
+  const bool single = base.code.size() == 1;
+  if (single != (tail == 0))
+    return nullptr;
+  auto first_symbol = [&](SyllableId id) {
+    Code code;
+    code.push_back(id);
+    vector<string> syllables;
+    if (!dict->Decode(code, &syllables) || syllables.empty() ||
+        syllables[0].empty())
+      return string();
+    const string& syllable = syllables[0];
+    size_t n = 1;
+    while (n < syllable.length() &&
+           (static_cast<unsigned char>(syllable[n]) & 0xC0) == 0x80)
+      ++n;
+    return syllable.substr(0, n);
+  };
+  const string initial = first_symbol(base.code.back());
+  if (initial.empty())
+    return nullptr;
+  for (size_t p = end; p-- > from;) {
+    if (single != (p == from))
+      continue;
+    auto row = graph.edges.find(p);
+    if (row == graph.edges.end())
+      continue;
+    auto full = row->second.find(toned_end);
+    if (full == row->second.end())
+      continue;
+    auto found = dict->Lookup(graph, p);
+    if (!found)
+      continue;
+    auto chars = found->find(toned_end);
+    if (chars == found->end())
+      continue;
+    for (auto& it = chars->second; !it.exhausted();) {
+      auto e = it.Peek();
+      if (e && e->text == last_char && e->code.size() == 1 &&
+          !e->IsPredictiveMatch() && first_symbol(e->code[0]) == initial) {
+        auto spelling = full->second.find(e->code[0]);
+        if (spelling != full->second.end() &&
+            !spelling->second.is_correction &&
+            spelling->second.type == kNormalSpelling) {
+          auto entry = New<DictEntry>(base);
+          entry->code.back() = e->code[0];
+          return entry;
+        }
+      }
+      if (!it.Next())
+        break;
+    }
+  }
+  return nullptr;
+}
+
 an<Phrase> ScriptTranslation::ExtendSelected(Dictionary* dict,
                                              UserDictionary* user_dict,
                                              const an<Phrase>& selected,
@@ -2826,6 +2914,75 @@ an<Phrase> ScriptTranslation::ExtendSelected(Dictionary* dict,
       }
     }
   }
+  // 換成吃到 best_end 的 best（整句只換最後一個成分）
+  auto extend_to = [&](const pair<an<DictEntry>, bool>& best, size_t best_end,
+                       double score) {
+    an<Phrase> result;
+    if (sentence) {
+      auto extended = New<Sentence>(translator_->language());
+      const auto& components = sentence->components();
+      const auto& lengths = sentence->word_lengths();
+      size_t pos = 0;
+      for (size_t i = 0; i + 1 < components.size(); ++i) {
+        pos += lengths[i];
+        extended->Extend(components[i], pos, components[i].weight);
+      }
+      extended->Extend(*best.first, best_end, score);
+      extended->Offset(start_);
+      result = extended;
+    } else {
+      result = New<Phrase>(translator_->language(),
+                           best.second ? "user_phrase" : "phrase", start_,
+                           start_ + best_end, best.first);
+    }
+    result->set_syllabifier(syllabifier_);
+    result->set_preedit(syllabifier_->GetPreeditString(*result));
+    return result;
+  };
+  // 蓬萊 0078：選到的詞停在一個照打的完整音節中間（561i␣ 是 ㄓˊ ㄅㄛˉ，選「直播」只吃到 ㄅ，ㄛˉ 落單變成「喔」）。
+  // 聲調鍵就是音節結尾：後面緊接「韻母＋聲調鍵」、中間沒有聲母，吃到聲調鍵剛好是這個詞收過的讀音（比重 0% 的也算；
+  // 詞沒收、最後一個字收過這個讀音也算），而且引擎自己最通順的讀法在這裡沒有切開，就直接吃到聲調鍵，不比分數：
+  // 比重是選字之前猜讀音用的，使用者已經選了這個詞。學習紀錄跟著記這個讀音，下次照打就排得上來。
+  // 最通順的讀法在這裡切開的（ㄋ|ㄧˇ|ㄨ 你以為，游標停在 ㄋ 後面換成「妳」）照舊比分數
+  if (const size_t toned_end = TonedSyllableEnd(input_, end)) {
+    pair<an<DictEntry>, bool> forced;
+    auto found = same.find(toned_end);
+    if (found != same.end()) {
+      forced = found->second;
+    } else {
+      auto base = same.find(end);
+      forced = {CharReadingEntry(dict, graph, from, end, toned_end,
+                                 base != same.end() ? *base->second.first
+                                                    : *last),
+                false};
+    }
+    if (forced.first) {
+      WordGraph words = LookupWordGraph(dict, user_dict, nullptr);
+      const size_t total = graph.interpreted_length;
+      an<Sentence> top;
+      if (max_sentences_ > 1) {
+        auto sentences =
+            poet_->MakeSentences(words, total, preceding_text, max_sentences_,
+                                 sentence_cutoff_threshold_);
+        if (!sentences.empty())
+          top = sentences.front();
+      } else {
+        top = poet_->MakeSentence(words, total, preceding_text);
+      }
+      bool cut = false;
+      if (top) {
+        top->Offset(start_);
+        top->set_syllabifier(syllabifier_);
+        cut = syllabifier_->Syllabify(top.get()).HasVertex(start_ + end);
+      }
+      if (!cut) {
+        *evaluated = true;
+        auto score = ScoreSplit(words, from, forced.first, toned_end, context);
+        return extend_to(forced, toned_end,
+                         score ? *score : forced.first->weight);
+      }
+    }
+  }
   if (same.upper_bound(end) == same.end())
     return nullptr;
   *evaluated = true;
@@ -2848,27 +3005,7 @@ an<Phrase> ScriptTranslation::ExtendSelected(Dictionary* dict,
   }
   if (!PreferSplit(base_score, best_score, translator_->split_penalty()))
     return nullptr;
-  an<Phrase> result;
-  if (sentence) {
-    auto extended = New<Sentence>(translator_->language());
-    const auto& components = sentence->components();
-    const auto& lengths = sentence->word_lengths();
-    size_t pos = 0;
-    for (size_t i = 0; i + 1 < components.size(); ++i) {
-      pos += lengths[i];
-      extended->Extend(components[i], pos, components[i].weight);
-    }
-    extended->Extend(*best.first, best_end, *best_score);
-    extended->Offset(start_);
-    result = extended;
-  } else {
-    result = New<Phrase>(translator_->language(),
-                         best.second ? "user_phrase" : "phrase", start_,
-                         start_ + best_end, best.first);
-  }
-  result->set_syllabifier(syllabifier_);
-  result->set_preedit(syllabifier_->GetPreeditString(*result));
-  return result;
+  return extend_to(best, best_end, *best_score);
 }
 
 // 蓬萊：英文單字進整句

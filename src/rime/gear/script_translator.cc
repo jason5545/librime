@@ -2945,10 +2945,30 @@ an<Phrase> ScriptTranslation::ExtendSelected(Dictionary* dict,
   // 比重是選字之前猜讀音用的，使用者已經選了這個詞。學習紀錄跟著記這個讀音，下次照打就排得上來。
   // 最通順的讀法在這裡切開的（ㄋ|ㄧˇ|ㄨ 你以為，游標停在 ㄋ 後面換成「妳」）照舊比分數
   if (const size_t toned_end = TonedSyllableEnd(input_, end)) {
+    // 只認照打就是完整音節的讀音：同樣文字的詞條是靠修正邊吃到聲調鍵的（ㄚ|ㄞ˙ 選「啊」，按鍵模型把 ㄞ 當多按的鍵
+    // 修成 ㄚ˙）不算，照舊比分數
+    auto typed_as_syllable = [&](SyllableId id) {
+      for (size_t p = from; p < end; ++p) {
+        auto row = graph.edges.find(p);
+        if (row == graph.edges.end())
+          continue;
+        auto full = row->second.find(toned_end);
+        if (full == row->second.end())
+          continue;
+        auto spelling = full->second.find(id);
+        if (spelling != full->second.end() &&
+            !spelling->second.is_correction &&
+            spelling->second.type == kNormalSpelling)
+          return true;
+      }
+      return false;
+    };
     pair<an<DictEntry>, bool> forced;
     auto found = same.find(toned_end);
     if (found != same.end()) {
-      forced = found->second;
+      const auto& entry = found->second.first;
+      if (!entry->code.empty() && typed_as_syllable(entry->code.back()))
+        forced = found->second;
     } else {
       auto base = same.find(end);
       forced = {CharReadingEntry(dict, graph, from, end, toned_end,

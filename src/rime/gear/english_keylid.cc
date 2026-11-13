@@ -198,8 +198,8 @@ std::unique_ptr<EnglishKeylid::Lattice> EnglishKeylid::Analyze(
       const uint32_t x = lat->ids_[a + len - 1];
       s += Lp(en_, h, x);
       h = ((h << 6) | x) & kMask;
-      if (len >= lmin)
-        lat->en_[a * width + len] = s + Lp(en_, h, end_);
+      // 比 min_length 短的也算：前向、後向不會用到（都從 lmin 開始找），Gap() 問得到
+      lat->en_[a * width + len] = s + Lp(en_, h, end_);
     }
   }
 
@@ -399,6 +399,15 @@ double EnglishKeylid::Lattice::Forced(const Span& span, int* idx) const {
     }
   }
   return best;
+}
+
+double EnglishKeylid::Lattice::Gap(size_t start, size_t end) const {
+  if (start >= end || end > input_.size() || !run_end_[start] ||
+      run_end_[start] < end)
+    return kNegInf;
+  int idx;
+  const double forced = Forced(Span{start, end, 0}, &idx);
+  return forced == kNegInf ? kNegInf : forced - best_;
 }
 
 double EnglishKeylid::Lattice::Llr(const Span& span) const {

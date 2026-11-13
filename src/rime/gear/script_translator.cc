@@ -826,6 +826,11 @@ ScriptTranslator::ScriptTranslator(const Ticket& ticket)
                         &english_letter_penalty_);
       config->GetInt(name_space_ + "/english_letter_position",
                      &english_letter_position_);
+      // 沒意義的英文不出：字母串的按鍵要像英文、沒排第一的整句不能比中文差太多（按鍵層的候選也看後者）
+      config->GetDouble(name_space_ + "/english_letter_margin",
+                        &english_letter_margin_);
+      config->GetDouble(name_space_ + "/english_sentence_margin",
+                        &english_sentence_margin_);
       config->GetInt(name_space_ + "/english_judge_readings",
                      &english_judge_readings_);
       // 整段都是數字鍵（大千的 0–9 是注音），中文組不通時退回成數字，只在有判斷表時
@@ -3484,6 +3489,38 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
   //    - 第一候選裡有學過 english_judge_learned 字以上的詞就不換。
   //    - 單字表外的字母串、數字（退回按鍵原本的字）：整段剛好是一個詞（不是組出來的句子）時不當候選，
   //      輪到下一個英文候選判斷。數字只看夠常用的詞（whole_common_word），冷僻詞照常判斷。
+  //    - 沒意義的英文不出（0080，Jason 11/13：upjouccjowji52l「因為也會回頭我知道」第 6–9 個是 upjouccjow我知道、
+  //      有pjouccjow我知道、up為以後會痛我知道、因為uc回頭我知道）：
+  //      a. 單字表外的字母串：按鍵層語言辨識（english_keylid）把這幾個鍵當一段英文，跟最佳切法差 english_letter_margin
+  //         以上（字母不像英文、當注音鍵順得多）的不當候選，不佔名額、輪到下一個判斷。沒有按鍵層的表時不擋。
+  //      b. 沒排第一的字母串、按鍵層候選：整句權重比最通順的中文整句（原本的第一候選；它是一個詞時用第一個整句）低
+  //         「english_sentence_margin × 英文段數」以上的不出。英文詞的權重是固定的，差這麼多是換掉的那幾個鍵原本是
+  //         通順的中文、換成英文之後前後的字也接不起來。排第一的不看這條（那是判斷表決定的）。
+  std::unique_ptr<EnglishKeylid::Lattice> lattice;
+  if (use_keylid)
+    lattice = keylid->Analyze(input_, translator_->keylid_params());
+  const double letter_margin = translator_->english_letter_margin();
+  auto unlike_english = [&](const vector<EnglishSpan>& config) {
+    if (!lattice || letter_margin < 0)
+      return false;
+    for (const auto& s : config) {
+      if (s.in_lexicon || s.digits)
+        continue;
+      // english_space 把後面緊接的空白算進這段：問按鍵層時只問字母
+      const size_t end = input_[s.end - 1] == ' ' ? s.end - 1 : s.end;
+      if (lattice->Gap(s.start, end) < -letter_margin)
+        return true;
+    }
+    return false;
+  };
+  an<Phrase> base;  // 最通順的中文整句
+  const double sentence_margin = translator_->english_sentence_margin();
+  auto too_weak = [&](const an<Phrase>& cand, size_t segments) {
+    return base && sentence_margin >= 0 &&
+           cand->weight() <
+               base->weight() - sentence_margin * static_cast<double>(
+                                                      (std::max<size_t>)(1, segments));
+  };
   bool promote = false;
   bool whole_word = false;
   // 蓋住整段的那個詞學過（commit_count > 0）或夠常用（比重 ≥ kDigitWordMinWeight）才擋數字：
@@ -3524,6 +3561,13 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
       readings.push_back(std::move(r));
     };
     int learned = 0;
+    if (first && Is<Sentence>(first) && first->start() == start_ &&
+        first->end() == start_ + n) {
+      base = first;
+    } else if (!sentences_.empty() && sentences_.front()->start() == start_ &&
+               sentences_.front()->end() == start_ + n) {
+      base = sentences_.front();
+    }
     if (first) {
       add_reading(first);
       if (auto sentence = As<Sentence>(first)) {
@@ -3632,19 +3676,27 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
     if (fallback && whole_word &&
         (!m.config->front().digits || whole_common_word))
       continue;
-    if (seen.insert(m.cand->text()).second) {
-      // 排第一：排在最前面的那個英文候選，比最通順的中文讀法高
-      bool first_here = false;
-      if (judge && !decided) {
-        decided = true;
-        first_here = promote && m.margin > 0;
-        english_first_ = first_here;
-      }
-      if (late && !first_here)
-        english_late_.push_back(m.cand);
-      else
-        english_.push_back(m.cand);
+    // 字母不像英文的字母串也不當候選（不佔名額，輪到下一個）
+    if (fallback && unlike_english(*m.config))
+      continue;
+    if (seen.count(m.cand->text()))
+      continue;
+    // 排第一：排在最前面的那個英文候選，比最通順的中文讀法高
+    bool first_here = false;
+    if (judge && !decided) {
+      decided = true;
+      first_here = promote && m.margin > 0;
+      english_first_ = first_here;
     }
+    // 沒排第一的字母串：整句比最通順的中文整句差太多的不出（數字、單字表的詞照舊）
+    if (!first_here && fallback && !m.config->front().digits &&
+        too_weak(m.cand, m.config->size()))
+      continue;
+    seen.insert(m.cand->text());
+    if (late && !first_here)
+      english_late_.push_back(m.cand);
+    else
+      english_.push_back(m.cand);
   }
   if (word && seen.insert(word->text()).second)
     english_.push_back(word);
@@ -3652,11 +3704,11 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
   // 6. 按鍵層語言辨識：同一串按鍵比中文注音鍵模型和英文字母模型（兩狀態分段 Viterbi），強制某一段是英文的最佳切法
   //    跟最佳切法差 english_keylid_margin 以內的，照差距取前 english_keylid_candidates 段（單字表、字母串已經有的
   //    切法不算，輪到下一段）。每段照「強制這段是英文」的那條切法組一句：切法裡其他的英文段也照字面（單字表的詞用
-  //    單字表的權重）。原本的第一候選已經有這幾個英文的、跟前面的候選同一句的不要。不判斷、不排第一：
+  //    單字表的權重）。原本的第一候選已經有這幾個英文的、跟前面的候選同一句的不要；整句比最通順的中文整句差太多的
+  //    也不要（english_sentence_margin，見 4.）。不判斷、不排第一：
   //    另外放在 keylid_，ScriptTranslator::Query 排在第 english_keylid_position 個起
   if (!use_keylid)
     return;
-  auto lattice = keylid->Analyze(input_, translator_->keylid_params());
   set<pair<size_t, size_t>> known;
   for (const auto& s : spans)
     known.insert({s.start, s.end});
@@ -3717,6 +3769,8 @@ void ScriptTranslation::MakeEnglishCandidates(Dictionary* dict,
         continue;
       cand->set_type("keylid");
     }
+    if (too_weak(cand, config.size()))
+      continue;
     if (seen.insert(cand->text()).second)
       keylid_.push_back(cand);
   }

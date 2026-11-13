@@ -56,6 +56,9 @@ class EnglishKeylid {
     double best() const { return best_; }
     // 邊際 LLR：強制這段英文的最佳切法 − 強制這段中文的最佳切法（其他段自由）；後者在 beam 裡找不到時回傳 +∞
     double Llr(const Span& span) const;
+    // 強制 [start, end) 是一段英文的最佳切法 − 最佳切法（≤ 0）：不管 margin、min_length，任何一段連續字母都能問。
+    // 不是連續字母、比 max_length 長、在 beam 裡走不通（差得太多）時回傳 −∞
+    double Gap(size_t start, size_t end) const;
     // 強制這段英文的最佳切法裡所有的英文段（含這一段），照位置
     std::vector<std::pair<size_t, size_t>> Path(const Span& span) const;
 

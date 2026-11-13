@@ -116,6 +116,11 @@ class ScriptTranslator : public Translator,
   int english_letter_trim() const { return english_letter_trim_; }
   double english_letter_penalty() const { return english_letter_penalty_; }
   int english_letter_position() const { return english_letter_position_; }
+  // 沒意義的英文不出（0080）。english_letter_margin：單字表外的字母串整段當英文，按鍵層語言辨識跟最佳切法差這麼多
+  // 以上的不當候選（要有 english_keylid 的表，沒有時不擋）。english_sentence_margin：沒排第一的字母串、按鍵層候選，
+  // 整句權重比最通順的中文整句低「這麼多 × 英文段數」以上的不出。負的＝不擋
+  double english_letter_margin() const { return english_letter_margin_; }
+  double english_sentence_margin() const { return english_sentence_margin_; }
   // 中文那邊比幾個讀法：原本的第一候選＋前 english_judge_readings 個整句，取判斷分數最高的
   int english_judge_readings() const { return english_judge_readings_; }
   // 整段都是數字鍵時也試數字（退回按鍵原本的字）：至少 digit_min_length 鍵，比照字母串多扣 digit_penalty
@@ -239,6 +244,8 @@ class ScriptTranslator : public Translator,
   int english_letter_trim_ = 2;
   double english_letter_penalty_ = 4.0;
   int english_letter_position_ = 6;
+  double english_letter_margin_ = 12.0;
+  double english_sentence_margin_ = 20.0;
   int english_judge_readings_ = 5;
   bool digit_runs_ = false;
   int digit_min_length_ = 2;

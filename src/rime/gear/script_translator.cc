@@ -224,7 +224,7 @@ class ScriptSyllabifier : public PhraseSyllabifier {
     syllabifier_.SetGlueSpellings(translator->glue_spellings());
   }
 
-  virtual Spans Syllabify(const Phrase* phrase);
+  Spans Syllabify(const Phrase* phrase) override;
   Spans SyllabifyRange(size_t from, size_t to) override;
   // 蓬萊：打法偵測。這個候選每個音節在音節圖上的邊：正常拼法（打完整、有聲調；罕用黏合音節改成簡拼類型的
   // 也算，照那段按鍵查 prism）加到 normal，其他（只打第一個、完整不帶聲調、聲母＋聲調）加到 other；英文字母的假音節不算

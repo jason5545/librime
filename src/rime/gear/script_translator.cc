@@ -225,6 +225,7 @@ class ScriptSyllabifier : public PhraseSyllabifier {
   }
 
   virtual Spans Syllabify(const Phrase* phrase);
+  Spans SyllabifyRange(size_t from, size_t to) override;
   // 蓬萊：打法偵測。這個候選每個音節在音節圖上的邊：正常拼法（打完整、有聲調；罕用黏合音節改成簡拼類型的
   // 也算，照那段按鍵查 prism）加到 normal，其他（只打第一個、完整不帶聲調、聲母＋聲調）加到 other；英文字母的假音節不算
   void CountSpellingTypes(const Phrase& phrase, int* normal, int* other) const;
@@ -1578,11 +1579,12 @@ bool ScriptTranslator::EnglishCode(const string& word, Code* code) {
 // 0077：打法是 abbrev（常常只打第一個注音）時，單獨一個聲母本來就是一個照打的音節，前一段是單獨的聲母、
 // 下一段從聲母開始也補（be e.␣ 是 ㄖ ㄍ ㄍㄡˉ，按鍵模型把連按兩下的 ㄍ 刪掉修成「乳溝」，← 從 5 直接跳到 1、
 // ㄍ|ㄍㄡˉ 那個切點不見）。只打完整注音、還不知道打法的人照舊不補
-static vector<size_t> TypedStops(const SyllableGraph& graph,
-                                 const string& input,
-                                 size_t from,
-                                 size_t to,
-                                 bool lone_initials) {
+// 從 from 只走不是修正的邊、音節最少的一條到 to（經過的切點，含兩端）。to 到不了時：
+// to_reachable 是 false 就回空的；是 true 就改走到 to 之前走得到的最遠那一點（0081）
+static vector<size_t> TypedPath(const SyllableGraph& graph,
+                                size_t from,
+                                size_t to,
+                                bool to_reachable = false) {
   map<size_t, size_t> prev;  // 終點 → 前一個切點
   vector<size_t> frontier{from};
   while (!frontier.empty() && !prev.count(to)) {
@@ -1611,12 +1613,24 @@ static vector<size_t> TypedStops(const SyllableGraph& graph,
     frontier = std::move(next_frontier);
   }
   vector<size_t> path;
-  if (!prev.count(to))
-    return path;
+  if (!prev.count(to)) {
+    if (!to_reachable || prev.empty())
+      return path;
+    to = prev.rbegin()->first;
+  }
   for (size_t pos = to; pos != from; pos = prev[pos])
     path.push_back(pos);
   path.push_back(from);
   std::reverse(path.begin(), path.end());
+  return path;
+}
+
+static vector<size_t> TypedStops(const SyllableGraph& graph,
+                                 const string& input,
+                                 size_t from,
+                                 size_t to,
+                                 bool lone_initials) {
+  vector<size_t> path = TypedPath(graph, from, to);
   vector<size_t> stops;
   for (size_t i = 1; i + 1 < path.size(); ++i) {
     size_t a = path[i - 1], p = path[i];
@@ -1669,6 +1683,25 @@ Spans ScriptSyllabifier::Syllabify(const Phrase* phrase) {
   if (syllabify_dfs(&task, 0, phrase->start() - start_)) {
     result.set_vertices(std::move(vertices));
   }
+  return result;
+}
+
+// 蓬萊（0081）：反白的候選只蓋住前段，前面的候選又沒有一個在反白結尾有切點時（Jason 11/25：
+// 2joji3ap7u.ctj42c 第一個是「的為我們有好處的話」ㄉ|ㄨㄟ，↓ 到「等我」ㄉ ㄨ，後段從 ㄟ 開始，
+// 沒有候選切在那裡），0070 照上游後段不加切點，← 從 17 一下跳到 2。改成照音節圖從反白結尾
+// 只走不是修正的邊、音節最少的一條，每個音節停一次；走不到結尾就停在走得到的最遠那一點
+Spans ScriptSyllabifier::SyllabifyRange(size_t from, size_t to) {
+  Spans result;
+  if (from < start_ || to <= from)
+    return result;
+  vector<size_t> path =
+      TypedPath(syllable_graph_, from - start_, to - start_, true);
+  if (path.size() < 2)
+    return result;
+  vector<size_t> vertices;
+  for (size_t p : path)
+    vertices.push_back(start_ + p);
+  result.set_vertices(std::move(vertices));
   return result;
 }
 

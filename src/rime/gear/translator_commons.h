@@ -54,6 +54,9 @@ class PhraseSyllabifier {
   virtual ~PhraseSyllabifier() = default;
 
   virtual Spans Syllabify(const Phrase* phrase) = 0;
+  // 蓬萊（0081）：from 到 to 這段照打的音節切點（不看哪個候選），← → 沒有候選可借切點時用。
+  // 預設不切（跟上游一樣）
+  virtual Spans SyllabifyRange(size_t from, size_t to) { return Spans(); }
 };
 
 //

@@ -213,6 +213,7 @@ void Navigator::BeginMove(Context* ctx) {
       // 第一個「檔案」是 dang|an，借來就多一個 dang 後面的切點；往下找到「單幹」dan|gan 才借）。
       // 只看反白之前的候選，都已經算好了，不會多翻譯；一個都沒有就跟上游一樣，後段不加切點
       if (covered < seg.end && seg.menu) {
+        bool borrowed = false;
         for (size_t i = 0; i < seg.selected_index; ++i) {
           auto cand = As<Phrase>(
               Candidate::GetGenuineCandidate(seg.menu->GetCandidateAt(i)));
@@ -229,7 +230,23 @@ void Navigator::BeginMove(Context* ctx) {
             spans_.AddVertex(next);
             pos = next;
           }
+          borrowed = true;
           break;
+        }
+        // 0081：沒有候選可借（「的為…」切在 ㄉ|ㄨㄟ，反白「等我」蓋到 ㄉ ㄨ），照音節圖把後段
+        // 照打的音節切出來，不然 ← 一下跳過整段。先問反白的候選，再問前面的（同一張音節圖）
+        for (size_t i = 0; !borrowed && i <= seg.selected_index; ++i) {
+          auto cand = i == seg.selected_index
+                          ? selected
+                          : As<Phrase>(Candidate::GetGenuineCandidate(
+                                seg.menu->GetCandidateAt(i)));
+          if (!cand || !cand->syllabifier())
+            continue;
+          Spans rest = cand->syllabifier()->SyllabifyRange(covered, seg.end);
+          if (rest.Count() == 0)
+            continue;
+          spans_.AddSpans(rest);
+          borrowed = true;
         }
       }
       spans_.AddSpan(seg.start, seg.end);

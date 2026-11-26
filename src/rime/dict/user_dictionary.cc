@@ -16,6 +16,7 @@
 #include <rime/ticket.h>
 #include <rime/algo/dynamics.h>
 #include <cstring>
+#include <deque>
 #include <rime/algo/syllabifier.h>
 #include <rime/algo/strings.h>
 #include <rime/dict/db.h>
@@ -38,6 +39,12 @@ static bool SkipShorterAbbreviation(const EdgeProperties& props,
 }
 
 
+// 蓬萊 0082：補上去的同音節輕聲／其他聲調扣的分（乘 0.5）：照打的讀音對得上的詞比較優先
+static const double kToneSiblingCredibility = std::log(0.5);
+// 走過補上去的邊時，詞至少要這麼多個音節才收：長句整句對上是很強的證據，一兩個字容易撞到別的讀音
+//（打 ㄅㄚˇ 收到學過的「吧」ㄅㄚ˙）。兩個音節也試過，效益題少 2 題、沒有多改對
+static const size_t kToneSiblingMinSyllables = 3;
+
 struct DfsState {
   size_t watermark = 0;  // 蓬萊：讀過的最遠位置
   size_t depth_limit;
@@ -59,6 +66,22 @@ struct DfsState {
   // 蓬萊：學習紀錄的版本（LevelDb 才有；TopLowerBound 的快取靠它判斷副本有沒有換過）
   bool has_version = false;
   size_t data_version = 0;
+  // 蓬萊 0082：音節圖的索引，和補了同音節輕聲／其他聲調的頂點（補過的頂點查 tone_indices，其他照原本）。
+  // 補上去的邊是原本那條邊的副本（tone_props，deque 加東西時舊的位址不變），可信度多扣 kToneSiblingCredibility
+  const SpellingIndices* indices = nullptr;
+  SpellingIndices tone_indices;
+  std::deque<EdgeProperties> tone_props;
+  // 補上去的邊（tone_props 的位址）和目前這條路走過幾條：只靠一兩個音節對上的不收（見 kToneSiblingMinSyllables）
+  hash_set<const EdgeProperties*> tone_set;
+  size_t tone_edges = 0;
+  hash_set<const DictEntry*> tone_entries;  // 走過補上去的邊收到的詞：同一段裡排在照打對上的後面
+  const SpellingIndex* IndexAt(size_t pos) const {
+    auto t = tone_indices.find(pos);
+    if (t != tone_indices.end())
+      return &t->second;
+    auto o = indices->find(pos);
+    return o != indices->end() ? &o->second : nullptr;
+  }
 
   // 讀取位置設成「Jump 到第 index 筆、再讀一筆」之後的樣子（跟 ForwardScan 的結果相同）
   void PlaceAfter(size_t index) {
@@ -221,6 +244,8 @@ void DfsState::RecruitEntry(size_t pos,
       e->code = code;
     }
     DLOG(INFO) << "add entry at pos " << pos;
+    if (tone_edges > 0)
+      tone_entries.insert(e.get());  // 蓬萊 0082
     query_result[pos].push_back(e);
   }
 }
@@ -297,6 +322,8 @@ void UserDictionary::Attach(const an<Table>& table, const an<Prism>& prism) {
   syllables_in_order_ = -1;  // 蓬萊：換了詞典要重查（SyllablesInOrder、TopLowerBound）
   syllable_count_ = 0;
   top_bounds_.clear();
+  tone_siblings_.clear();  // 蓬萊 0082：換了詞典要重建
+  tone_siblings_state_ = -1;
 }
 
 bool UserDictionary::Load() {
@@ -352,8 +379,8 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
                                DfsState* state) {
   if (current_pos > state->watermark)
     state->watermark = current_pos;
-  auto index = syll_graph.indices.find(current_pos);
-  if (index == syll_graph.indices.end()) {
+  const SpellingIndex* index = state->IndexAt(current_pos);  // 蓬萊 0082
+  if (!index) {
     return;
   }
   DLOG(INFO) << "dfs lookup starts from " << current_pos;
@@ -434,7 +461,7 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
   };
   const size_t base = current_prefix.size();
   const bool in_order = filter && SyllablesInOrder();
-  const SpellingIndex& spellings = index->second;
+  const SpellingIndex& spellings = *index;
   const size_t num_syllables = spellings.size();
   // 一次跳過一串沒有的音節（下面）：音節編號都在 SyllablesInOrder 查過的範圍裡（拼法都不是空的）才做
   const bool can_skip = in_order && num_syllables > 0 &&
@@ -562,6 +589,9 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
       auto props = spelling.second[i];
       if (SkipShorterAbbreviation(*props, i, &exact))
         continue;
+      const bool tone_edge = !state->tone_set.empty() &&
+                             state->tone_set.count(props) > 0;  // 蓬萊 0082
+      state->tone_edges += tone_edge;
       state->credibility.push_back(state->credibility.back() +
                                    props->credibility);
       size_t end_pos = props->end_pos;
@@ -573,11 +603,15 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
           (is_normal_spelling ? 1.0 : 0.0) * (end_pos - current_pos);
       state->quality_len.push_back(state->quality_len.back() +
                                    delta_quality_len);
-      BOOST_SCOPE_EXIT((&state)) {
+      BOOST_SCOPE_EXIT((&state)(tone_edge)) {
         state->credibility.pop_back();
         state->quality_len.pop_back();
+        state->tone_edges -= tone_edge;
       }
       BOOST_SCOPE_EXIT_END
+      // 蓬萊 0082：走過補上去的邊、音節又太少的詞不收（打 ㄅㄚˇ 收到學過的「吧」ㄅㄚ˙、打 ㄉㄜ˙ ㄉㄠˋ 收到「得到」）
+      const bool tone_ok = state->tone_edges == 0 ||
+                           state->depth() >= kToneSiblingMinSyllables;
       DLOG(INFO) << "edge: [" << current_pos << ", " << end_pos << ")";
       if (prefix != *state->key) {  // 'a b c |d ' > 'a b c \tabracadabra'
         DLOG(INFO) << "forward scanning for '" << prefix << "'.";
@@ -591,12 +625,12 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
       }
       while (state->IsExactMatch(prefix)) {  // 'b |e ' vs. 'b e \tBe'
         DLOG(INFO) << "match found for '" << prefix << "'.";
-        state->RecruitEntry(end_pos);
+        if (tone_ok)
+          state->RecruitEntry(end_pos);
         if (!state->NextEntry())  // reached the end of db
           break;
       }
-      auto next_index = syll_graph.indices.find(end_pos);
-      if (next_index == syll_graph.indices.end()) {
+      if (!state->IndexAt(end_pos)) {  // 蓬萊 0082
         // reached the end of input, predict word if requested
         if (state->predict_word_from_depth != 0 &&
             state->depth() >= state->predict_word_from_depth) {
@@ -614,7 +648,8 @@ void UserDictionary::DfsLookup(const SyllableGraph& syll_graph,
                 syllabary_[*s] = syllable_id++;
               }
             }
-            state->RecruitEntry(end_pos, &syllabary_);
+            if (tone_ok)
+              state->RecruitEntry(end_pos, &syllabary_);
             if (!state->NextEntry())  // reached the end of db
               break;
           }
@@ -676,6 +711,8 @@ an<UserDictEntryCollector> UserDictionary::Lookup(
   state.rows = state.accessor->SortedRecords();
   if (state.rows)
     state.ranges.emplace_back(0, state.rows->size());
+  state.indices = &syll_graph.indices;
+  AddToneSiblings(syll_graph, start_pos, &state);  // 蓬萊 0082
   string prefix;
   DfsLookup(syll_graph, start_pos, prefix, &state);
   if (watermark && state.watermark > *watermark)
@@ -686,6 +723,12 @@ an<UserDictEntryCollector> UserDictionary::Lookup(
   for (auto& v : state.query_result) {
     auto& entries = v.second;
     entries.Sort();
+    // 蓬萊 0082：照打的讀音對得上的詞在前，靠輕聲互通收到的在後（各自照權重）
+    if (!state.tone_entries.empty())
+      std::stable_partition(entries.begin(), entries.end(),
+                            [&](const an<DictEntry>& e) {
+                              return !state.tone_entries.count(e.get());
+                            });
     if (state.predict_word_from_depth) {
       if (!entries.empty() && entries.front()->IsPredictiveMatch()) {
         DLOG(INFO) << "front entry is predictive match: "
@@ -940,6 +983,133 @@ size_t UserDictionary::TopLowerBound(const vector<pair<string, string>>& rows,
   }
   *cmp = b.cmp;
   return b.index;
+}
+
+
+// 注音音節拆成「去掉聲調的部分」和聲調（0 輕聲，1–4）；不是注音（第一個字不是注音符號、英文的假音節 ~）回傳 false
+static bool split_zhuyin_tone(const string& s, string* base, int* tone) {
+  // 注音符號 U+3100–U+312F 是 E3 84 80–E3 84 AF；聲調 ˊ CB 8A、ˇ CB 87、ˋ CB 8B、˙ CB 99、ˉ CB 89
+  if (s.size() < 3 || static_cast<unsigned char>(s[0]) != 0xE3 ||
+      static_cast<unsigned char>(s[1]) != 0x84 ||
+      s.find('~') != string::npos)
+    return false;
+  *base = s;
+  *tone = 1;
+  if (s.size() >= 5 && static_cast<unsigned char>(s[s.size() - 2]) == 0xCB) {
+    switch (static_cast<unsigned char>(s.back())) {
+      case 0x89: *tone = 1; break;
+      case 0x8A: *tone = 2; break;
+      case 0x87: *tone = 3; break;
+      case 0x8B: *tone = 4; break;
+      case 0x99: *tone = 0; break;
+      default: return true;
+    }
+    base->resize(s.size() - 2);
+  }
+  return true;
+}
+
+const vector<SyllableId>& UserDictionary::ToneSiblings(SyllableId syllable_id) {
+  static const vector<SyllableId> kNone;
+  if (tone_siblings_state_ < 0) {
+    tone_siblings_state_ = 0;
+    tone_siblings_.clear();
+    Syllabary syllabary;
+    if (table_ && table_->GetSyllabary(&syllabary)) {
+      // 編號照音節表的順序給（同 DfsLookup 預測詞時建的 syllabary_）
+      map<string, vector<pair<SyllableId, int>>> groups;
+      SyllableId id = 0;
+      for (const auto& s : syllabary) {
+        string base;
+        int tone = 0;
+        if (split_zhuyin_tone(s, &base, &tone))
+          groups[base].emplace_back(id, tone);
+        ++id;
+      }
+      tone_siblings_.resize(syllabary.size());
+      for (const auto& g : groups) {
+        const auto& members = g.second;
+        bool has_light = std::any_of(members.begin(), members.end(),
+                                     [](const pair<SyllableId, int>& m) {
+                                       return m.second == 0;
+                                     });
+        if (!has_light || members.size() < 2)
+          continue;
+        for (const auto& a : members)
+          for (const auto& b : members)
+            if (a.first != b.first && (a.second == 0) != (b.second == 0))
+              tone_siblings_[a.first].push_back(b.first);
+        tone_siblings_state_ = 1;
+      }
+      if (tone_siblings_state_ == 0)
+        tone_siblings_.clear();
+    }
+  }
+  if (tone_siblings_state_ != 1 || syllable_id < 0 ||
+      static_cast<size_t>(syllable_id) >= tone_siblings_.size())
+    return kNone;
+  return tone_siblings_[syllable_id];
+}
+
+void UserDictionary::AddToneSiblings(const SyllableGraph& syll_graph,
+                                     size_t start_pos,
+                                     DfsState* state) {
+  if (!table_)
+    return;
+  ToneSiblings(0);  // 建表
+  if (tone_siblings_state_ != 1)
+    return;
+  vector<pair<SyllableId, const EdgeProperties*>> all;
+  vector<pair<SyllableId, size_t>> seen;  // 補過的（音節, 終點）：兩個聲調補到同一個輕聲時只補一次
+  for (auto it = syll_graph.indices.lower_bound(start_pos);
+       it != syll_graph.indices.end(); ++it) {
+    const SpellingIndex& index = it->second;
+    all.clear();
+    seen.clear();
+    bool added = false;
+    for (const auto& item : index) {
+      for (auto props : item.second)
+        all.emplace_back(item.first, props);
+      for (SyllableId sibling : ToneSiblings(item.first)) {
+        auto present = index.find(sibling);
+        for (auto props : item.second) {
+          // 只放寬照打的完整音節：按鍵模型、容錯修過的邊不再放寬（ㄜ˙ 修成 ㄛ˙ 再對到 ㄛˊ），
+          // 簡拼也不放寬（「ㄗ˙」是聲母加聲調的簡拼，放寬了聲調就等於沒打）
+          if (props->is_correction || props->type != kNormalSpelling)
+            continue;
+          // 同一個起點、終點本來就有這個音節（沒打聲調）就不補；只看音節不看終點不行：
+          // 簡拼 ㄍ 到下一個鍵就有 ㄍㄜˋ，打完的 ㄍㄜ˙ 那條邊還是要補
+          if (present != index.end() &&
+              std::any_of(present->second.begin(), present->second.end(),
+                          [&](const EdgeProperties* p) {
+                            return p->end_pos == props->end_pos;
+                          }))
+            continue;
+          const pair<SyllableId, size_t> key(sibling, props->end_pos);
+          if (std::find(seen.begin(), seen.end(), key) != seen.end())
+            continue;
+          seen.push_back(key);
+          state->tone_props.push_back(*props);
+          state->tone_props.back().credibility += kToneSiblingCredibility;
+          state->tone_set.insert(&state->tone_props.back());
+          all.emplace_back(sibling, &state->tone_props.back());
+        }
+        added = true;
+      }
+    }
+    if (!added)
+      continue;
+    // 照音節編號排（同一個音節：原本的邊在前、補上去的照補的順序）
+    std::stable_sort(all.begin(), all.end(),
+                     [](const pair<SyllableId, const EdgeProperties*>& a,
+                        const pair<SyllableId, const EdgeProperties*>& b) {
+                       return a.first < b.first;
+                     });
+    SpellingIndex& out = state->tone_indices[it->first];
+    out.Reset(all.size());
+    for (const auto& x : all)
+      out.Append(x.first, x.second);
+  }
 }
 
 const string& UserDictionary::SyllableSpelling(SyllableId syllable_id) {

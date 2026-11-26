@@ -175,6 +175,10 @@ struct SyllabifyTask {
                 size_t next_pos)>
       push;
   function<void(SyllabifyTask* task, size_t depth)> pop;
+  // 蓬萊 0082：學習紀錄靠同音節的輕聲／其他聲調查到的詞（UserDictionary::ToneSiblings），碼裡的音節不在邊上，
+  // 對不上時改找同一組的音節。edge_id 是 push 時這一層實際走的邊上的音節（找邊的屬性用它，不用 code[depth]）
+  UserDictionary* tones = nullptr;
+  SyllableId edge_id = -1;
 };
 
 static bool syllabify_dfs(SyllabifyTask* task,
@@ -193,7 +197,18 @@ static bool syllabify_dfs(SyllabifyTask* task,
     if (end_vertex_pos > task->target_pos)
       continue;
     auto x = y.second.find(syllable_id);
+    SyllableId on_edge = syllable_id;
+    if (x == y.second.end() && task->tones) {
+      for (SyllableId sibling : task->tones->ToneSiblings(syllable_id)) {
+        x = y.second.find(sibling);
+        if (x != y.second.end()) {
+          on_edge = sibling;
+          break;
+        }
+      }
+    }
     if (x != y.second.end()) {
+      task->edge_id = on_edge;
       task->push(task, depth, current_pos, end_vertex_pos);
       if (syllabify_dfs(task, depth + 1, end_vertex_pos))
         return true;
@@ -1661,7 +1676,7 @@ Spans ScriptSyllabifier::Syllabify(const Phrase* phrase) {
         if (start_iter != syllable_graph_.edges.end()) {
           auto end_iter = start_iter->second.find(next_pos);
           if (end_iter != start_iter->second.end()) {
-            auto prop_iter = end_iter->second.find(task->code[depth]);
+            auto prop_iter = end_iter->second.find(task->edge_id);
             if (prop_iter != end_iter->second.end() &&
                 prop_iter->second.is_correction) {
               for (size_t stop :
@@ -1680,6 +1695,7 @@ Spans ScriptSyllabifier::Syllabify(const Phrase* phrase) {
         vertices.resize(vertices.size() - pushed.back());
         pushed.pop_back();
       }};
+  task.tones = translator_ ? translator_->user_dict() : nullptr;  // 蓬萊 0082
   if (syllabify_dfs(&task, 0, phrase->start() - start_)) {
     result.set_vertices(std::move(vertices));
   }
@@ -1736,7 +1752,7 @@ void ScriptSyllabifier::CountSpellingTypes(const Phrase& phrase,
       [&](SyllabifyTask* task, size_t depth, size_t current_pos,
           size_t next_pos) {
         int kind = -1;
-        SyllableId id = task->code[depth];
+        SyllableId id = task->edge_id;
         auto start_iter = syllable_graph_.edges.find(current_pos);
         if (start_iter != syllable_graph_.edges.end()) {
           auto end_iter = start_iter->second.find(next_pos);
@@ -1761,6 +1777,7 @@ void ScriptSyllabifier::CountSpellingTypes(const Phrase& phrase,
         kinds.push_back(kind);
       },
       [&](SyllabifyTask* task, size_t depth) { kinds.pop_back(); }};
+  task.tones = translator_ ? translator_->user_dict() : nullptr;  // 蓬萊 0082
   if (!syllabify_dfs(&task, 0, phrase.start() - start_))
     return;
   for (int kind : kinds) {
@@ -1797,7 +1814,7 @@ bool ScriptSyllabifier::IsCorrection(const Code& code,
       // push
       [&](SyllabifyTask* task, size_t depth, size_t current_pos,
           size_t next_pos) {
-        auto id = task->code[depth];
+        auto id = task->edge_id;
 
         auto start_iter = syllable_graph_.edges.find(current_pos);
         if (start_iter != syllable_graph_.edges.end()) {
@@ -1816,6 +1833,7 @@ bool ScriptSyllabifier::IsCorrection(const Code& code,
       // pop
       [&](SyllabifyTask* task, size_t depth) { path_attributes.pop_back(); }};
 
+  task.tones = translator_ ? translator_->user_dict() : nullptr;  // 蓬萊 0082
   if (syllabify_dfs(&task, 0, 0)) {
     for (bool is_correction : path_attributes) {
       if (is_correction)
@@ -1838,9 +1856,10 @@ bool ScriptSyllabifier::UsesWeak(const Code& code,
       code, syllable_graph_, end,
       [&](SyllabifyTask* task, size_t depth, size_t current_pos,
           size_t next_pos) {
-        path.emplace_back(current_pos, next_pos, task->code[depth]);
+        path.emplace_back(current_pos, next_pos, task->edge_id);
       },
       [&](SyllabifyTask* task, size_t depth) { path.pop_back(); }};
+  task.tones = translator_ ? translator_->user_dict() : nullptr;  // 蓬萊 0082
   if (syllabify_dfs(&task, 0, start)) {
     for (const auto& e : path)
       if (weak.count(e))
@@ -1869,6 +1888,7 @@ string ScriptSyllabifier::GetPreeditString(const Phrase& cand) const {
                        output.resize(lengths.top());
                        lengths.pop();
                      }};
+  task.tones = translator_ ? translator_->user_dict() : nullptr;  // 蓬萊 0082
   if (syllabify_dfs(&task, 0, cand.start() - start_)) {
     return translator_->FormatPreedit(output);
   } else {

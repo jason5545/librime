@@ -110,6 +110,10 @@ class UserDictionary : public Class<UserDictionary, const Ticket&> {
 
   const string& name() const { return name_; }
   TickCount tick() const { return tick_; }
+  // 蓬萊 0082：同一個注音音節的輕聲和其他聲調（輕聲 → 同音節的其他聲調；其他聲調 → 同音節的輕聲）。
+  // 學習紀錄記的讀音跟打的聲調只差在輕聲時也查得到（DfsLookup），syllabify 對不上邊時也照這張表找
+  //（script_translator 的 syllabify_dfs）。不是注音、沒有輕聲的音節是空的
+  const vector<SyllableId>& ToneSiblings(SyllableId syllable_id);
   // 蓬萊：學習紀錄的版本（LevelDB 每次寫入、交易、開關都換一個新值；不是 LevelDB 時每次都不同）。
   // ScriptTranslator 跨按鍵沿用查詞結果時，版本變了就不沿用
   size_t data_version() const;
@@ -144,6 +148,10 @@ class UserDictionary : public Class<UserDictionary, const Ticket&> {
                  size_t current_pos,
                  const string& current_prefix,
                  DfsState* state);
+  // 蓬萊 0082：start_pos 以後的頂點補上同音節的輕聲／其他聲調（ToneSiblings），補過的放進 state
+  void AddToneSiblings(const SyllableGraph& syll_graph,
+                       size_t start_pos,
+                       DfsState* state);
 
  private:
   string name_;
@@ -164,6 +172,9 @@ class UserDictionary : public Class<UserDictionary, const Ticket&> {
   const void* top_rows_ = nullptr;
   size_t top_rows_size_ = 0;
   size_t top_version_ = 0;
+  // 蓬萊 0082：ToneSiblings 的表（照音節編號；-1 還沒建、0 建過沒有、1 有）
+  vector<vector<SyllableId>> tone_siblings_;
+  int tone_siblings_state_ = -1;
   TickCount tick_ = 0;
   time_t transaction_time_ = 0;
 };
